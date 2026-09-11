@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-09-11
+
 ### Added
 
 - **Node health in Homer.** With `[hep]` shipping to a collector, each node now sends its
