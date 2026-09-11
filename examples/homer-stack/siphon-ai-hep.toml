@@ -53,6 +53,9 @@ http_listen = "0.0.0.0:9091"
 enabled = true
 collector = "host.docker.internal:9060"
 capture_id = 2001
+# Node-health heartbeat to Homer (0.52.0): search correlation id
+# `node:<[node].id>` for this node's timeline. 0 = transitions only.
+node_status_interval_secs = 60
 
 [[route]]
 name = "default"

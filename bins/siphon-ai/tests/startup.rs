@@ -506,6 +506,106 @@ async fn runtime_with_hep_enabled_binds_and_drains_worker_on_shutdown() {
     drop(homer);
 }
 
+/// Node health reaches the collector end to end (0.52.0): a real daemon
+/// ships `node_started` (before `/ready` flips) at boot and `node_stopping`
+/// at teardown, both keyed `node:<[node].id>`. `node_stopping` arriving at
+/// all is the ordering check — it must be queued before the HEP worker
+/// drains, or teardown discards it. Matches on the raw datagrams: the
+/// payload and correlation chunks are carried verbatim, so no decoder.
+#[tokio::test]
+async fn runtime_ships_node_health_to_the_collector_from_start_to_stop() {
+    install_crypto_provider();
+    let homer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake collector");
+    let homer_addr = homer.local_addr().unwrap();
+
+    // Record datagrams until `node_stopping` arrives (or give up).
+    let collector = tokio::spawn(async move {
+        let mut datagrams: Vec<String> = Vec::new();
+        let mut buf = vec![0u8; 65_535];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while let Ok(Ok(n)) = tokio::time::timeout_at(deadline, homer.recv(&mut buf)).await {
+            let datagram = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let last = datagram.contains("node_stopping ");
+            datagrams.push(datagram);
+            if last {
+                break;
+            }
+        }
+        datagrams
+    });
+
+    let env = OwnedMapEnv::new(&[
+        ("TEST_SIP_LISTEN", "127.0.0.1:0".to_string()),
+        ("TEST_RTP_MIN", "40700".to_string()),
+        ("TEST_RTP_MAX", "40800".to_string()),
+        ("TEST_HEP_COLLECTOR", homer_addr.to_string()),
+    ]);
+    let cfg = load_from_str_with_env(HEP_FIXTURE, &env).expect("config compiles");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds with HEP");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown_tx.send(()).expect("shutdown signal");
+    tokio::time::timeout(Duration::from_secs(5), run_handle)
+        .await
+        .expect("runtime exits")
+        .expect("task does not panic");
+
+    let datagrams = collector.await.expect("collector task");
+    const EVENTS: [&str; 6] = [
+        "node_started ",
+        "node_ready ",
+        "node_not_ready ",
+        "node_draining ",
+        "node_status ",
+        "node_stopping ",
+    ];
+    let node: Vec<&String> = datagrams
+        .iter()
+        .filter(|d| EVENTS.iter().any(|e| d.contains(e)))
+        .collect();
+    let event_of = |d: &str| {
+        EVENTS
+            .iter()
+            .find(|e| d.contains(*e))
+            .map(|e| e.trim_end().to_string())
+    };
+    let events: Vec<String> = node.iter().filter_map(|d| event_of(d)).collect();
+
+    assert_eq!(
+        events.first().map(String::as_str),
+        Some("node_started"),
+        "{events:?}"
+    );
+    assert!(
+        node[0].contains("ready=false"),
+        "node_started goes out before /ready flips: {}",
+        node[0]
+    );
+    assert_eq!(
+        events.last().map(String::as_str),
+        Some("node_stopping"),
+        "node_stopping must be queued before the HEP worker drains: {events:?}"
+    );
+    for d in &node {
+        assert!(
+            d.contains("node:siphon-ai-hep-test"),
+            "every node-health chunk is keyed by the node: {d}"
+        );
+    }
+}
+
 // ─── Product token on the wire (issue #539) ────────────────────────
 //
 // `[sip].user_agent` was documented to brand the `User-Agent` and

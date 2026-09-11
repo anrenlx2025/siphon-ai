@@ -154,6 +154,10 @@ pub struct Runtime {
     /// The HEP UDP worker JoinHandle. Held for the daemon's
     /// lifetime; aborted on shutdown.
     hep_worker: Option<HepWorkerHandle>,
+    /// Node-health reporter (0.52.0). `Some` when `[hep]` ships to a
+    /// collector; stopped on teardown before `hep_worker` drains, so its
+    /// `node_stopping` line reaches the wire.
+    node_health: Option<siphon_ai_telemetry::NodeHealthReporter>,
     /// The recording upload worker (0.25.0). `Some` when
     /// `[recording.storage]` is enabled; aborted on shutdown (jobs are
     /// durable in the spool, so an in-flight upload just re-runs next
@@ -261,6 +265,10 @@ impl Runtime {
         if !sip.listen_addr.ip().is_unspecified() && !local_ips.contains(&sip.listen_addr.ip()) {
             local_ips.push(sip.listen_addr.ip());
         }
+        // Node-health reporting (0.52.0) runs only with a real collector:
+        // outer `None` = no reporter, inner = the heartbeat period.
+        // Taken before `build_hep_telemetry` consumes the config.
+        let node_health_heartbeat = hep.enabled.then_some(hep.node_status_interval);
         let hep_built = build_hep_telemetry(
             &node,
             hep,
@@ -1334,6 +1342,25 @@ impl Runtime {
                 }
             })
         };
+        // Node health to Homer (0.52.0): the same status snapshot and
+        // readiness flag `GET /admin/v1/status` and `/ready` serve, so
+        // Homer cannot disagree with them. Spawned before `mark_ready`
+        // below so the flip ships as its own `node_ready`.
+        let node_health = match (&hep_telemetry, node_health_heartbeat) {
+            (Some(hep), Some(heartbeat)) => {
+                info!(
+                    heartbeat_secs = heartbeat.map(|d| d.as_secs()).unwrap_or(0),
+                    "HEP node-health reporting active"
+                );
+                Some(siphon_ai_telemetry::NodeHealthReporter::spawn(
+                    Arc::clone(hep),
+                    status_fn.clone(),
+                    readiness.clone(),
+                    heartbeat,
+                ))
+            }
+            _ => None,
+        };
         let admin_state = AdminState {
             status: Some(status_fn),
             drain_start: Some(drain_start_fn),
@@ -1419,6 +1446,7 @@ impl Runtime {
             admin: admin_server,
             hep_telemetry,
             hep_worker,
+            node_health,
             upload_worker: upload_worker_handle,
             otel,
             otel_log: otel_log_control,
@@ -1537,6 +1565,13 @@ impl Runtime {
         // Stop the authenticated admin listener.
         if let Some(server) = self.admin {
             server.shutdown().await;
+        }
+
+        // Last node-health lines — a drain the final poll missed, then
+        // `node_stopping` — queued before the worker drains so they reach
+        // the collector (0.52.0).
+        if let Some(reporter) = self.node_health {
+            reporter.stop().await;
         }
 
         // Drain the HEP UDP worker — aborts the task, bounded wait.

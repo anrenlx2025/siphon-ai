@@ -13,6 +13,11 @@
 //!   the admin `POST /admin/v1/hep/test` probe uses the lower-level
 //!   [`HepTelemetry::emit_log`].
 //!
+//! - Node health, also as `Log` chunks: `node_started`, `node_ready`,
+//!   `node_draining`, a periodic `node_status` and `node_stopping`, keyed
+//!   by `node:<[node].id>` so Homer shows each node as its own timeline.
+//!   See [`NodeHealthReporter`].
+//!
 //! `HepProtocol::Cdr` (0x65) chunks — the full CDR JSON emitted when a
 //! call ends — are composed by `siphon-ai-cdr`'s `HepCdrSink`, which
 //! shares this module's `HepSink` via [`HepTelemetry::sink`] rather
@@ -41,17 +46,23 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use hep_rs::{
     HepPacket, HepProtocol, HepSinkHandle, IpProto, UdpHepSink, UdpHepSinkConfig, UdpHepSinkError,
 };
 use metrics::counter;
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tokio::time::MissedTickBehavior;
+use tracing::{debug, warn};
 
-use crate::metrics::{HEP_COLLECTOR_UP, HEP_PACKETS_DROPPED_TOTAL, HEP_PACKETS_SENT_TOTAL};
+use crate::admin::{StatusFn, StatusResponse};
+use crate::metrics::{
+    HEP_COLLECTOR_UP, HEP_NODE_EVENTS_TOTAL, HEP_PACKETS_DROPPED_TOTAL, HEP_PACKETS_SENT_TOTAL,
+};
+use crate::readiness::ReadinessFlag;
 
 /// Telemetry-owned HEP plumbing. Holds the shared `Arc<dyn HepSink>`
 /// for both the sip-hep / forge-hep emitters and SiphonAI's own
@@ -369,6 +380,30 @@ impl HepTelemetry {
         );
     }
 
+    /// Emit one node-health moment as a `Log` chunk correlated by
+    /// [`node_correlation_id`] (`node:<[node].id>`), so Homer shows a
+    /// node's health as its own timeline, apart from any call. The
+    /// payload is one `key=value` line led by the event name —
+    /// `node_status node=… version=… ready=… draining=… active_calls=…
+    /// registrations=<registered>/<total> uptime_secs=…` — built from the
+    /// `GET /admin/v1/status` snapshot plus the `/ready` flag.
+    /// [`NodeHealthReporter`] is the caller in the daemon.
+    pub fn emit_node_health(&self, event: NodeEvent, status: &StatusResponse, ready: bool) {
+        self.emit_log(
+            &node_health_line(&self.node_id, event, status, ready),
+            Some(&node_correlation_id(&self.node_id)),
+            None,
+        );
+        counter!(HEP_NODE_EVENTS_TOTAL, "event" => event.as_str()).increment(1);
+        debug!(
+            event = event.as_str(),
+            ready,
+            draining = status.draining,
+            active_calls = status.active_calls,
+            "HEP node-health chunk queued"
+        );
+    }
+
     /// Emit a STIR/SHAKEN verdict as a HEP3 chunk-type 102
     /// (`HepProtocol::Verstat`). `payload` is the verdict already
     /// serialized (siphon-ai serializes the `VerificationResult` as JSON,
@@ -489,6 +524,240 @@ fn push_field(line: &mut String, key: &str, value: &str) {
     }
 }
 
+/// The node-health moments [`HepTelemetry::emit_node_health`] ships — see
+/// `docs/HEP.md` → *Node health Log chunks*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeEvent {
+    /// The reporter started: the first line a node sends after boot.
+    Started,
+    /// `/ready` went 503 → 200.
+    Ready,
+    /// `/ready` went 200 → 503 without a drain. Nothing does that today;
+    /// if something starts to, Homer shows it rather than hiding it.
+    NotReady,
+    /// A graceful drain began (SIGTERM or `POST /admin/v1/drain`).
+    Draining,
+    /// The periodic snapshot, every `[hep].node_status_interval_secs`.
+    Status,
+    /// Teardown — the last line, queued before the HEP worker drains.
+    Stopping,
+}
+
+impl NodeEvent {
+    /// The line's leading token, and the `event` label on
+    /// `siphon_ai_hep_node_events_total`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "node_started",
+            Self::Ready => "node_ready",
+            Self::NotReady => "node_not_ready",
+            Self::Draining => "node_draining",
+            Self::Status => "node_status",
+            Self::Stopping => "node_stopping",
+        }
+    }
+}
+
+/// Correlation id for a node's health chunks: `node:<[node].id>`. Not a
+/// SIP Call-ID, and namespaced so it can never be mistaken for one.
+pub fn node_correlation_id(node_id: &str) -> String {
+    format!("node:{node_id}")
+}
+
+/// Compose the text payload for [`HepTelemetry::emit_node_health`].
+fn node_health_line(
+    node_id: &str,
+    event: NodeEvent,
+    status: &StatusResponse,
+    ready: bool,
+) -> String {
+    let flag = |b: bool| if b { "true" } else { "false" };
+    let mut line = String::with_capacity(160);
+    line.push_str(event.as_str());
+    push_field(&mut line, "node", node_id);
+    push_field(&mut line, "version", &status.version);
+    push_field(&mut line, "ready", flag(ready));
+    push_field(&mut line, "draining", flag(status.draining));
+    push_field(&mut line, "active_calls", &status.active_calls.to_string());
+    push_field(
+        &mut line,
+        "registrations",
+        &format!(
+            "{}/{}",
+            status.registrations.registered, status.registrations.total
+        ),
+    );
+    push_field(&mut line, "uptime_secs", &status.uptime_secs.to_string());
+    line
+}
+
+/// The event a change in `(ready, draining)` amounts to, if any. A drain
+/// flips both at once and reads as `node_draining` alone: not-ready is
+/// implied by it, and reporting both would say the same thing twice.
+fn node_transition(before: (bool, bool), now: (bool, bool)) -> Option<NodeEvent> {
+    let ((was_ready, was_draining), (ready, draining)) = (before, now);
+    if draining && !was_draining {
+        Some(NodeEvent::Draining)
+    } else if ready && !was_ready {
+        Some(NodeEvent::Ready)
+    } else if was_ready && !ready && !draining {
+        Some(NodeEvent::NotReady)
+    } else {
+        None
+    }
+}
+
+/// How often [`NodeHealthReporter`] checks `/ready` and the drain flag for
+/// a change: well inside any probe period, and each check is an atomic
+/// load plus the status snapshot.
+const NODE_HEALTH_POLL: Duration = Duration::from_secs(1);
+
+/// How long [`NodeHealthReporter::stop`] waits for the last lines before
+/// abandoning the task rather than holding up teardown.
+const NODE_HEALTH_STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Ships a node's health to Homer for the life of the daemon: a
+/// `node_started` line when spawned, `node_ready` / `node_not_ready` /
+/// `node_draining` when `/ready` or the drain flag changes (checked every
+/// [`NODE_HEALTH_POLL`]), a `node_status` snapshot every heartbeat, and a
+/// final `node_stopping` from [`Self::stop`].
+///
+/// The state is read, never held: `status` is the closure
+/// `GET /admin/v1/status` serves and `readiness` the flag `/ready` answers
+/// from, so Homer, the admin API and a load balancer's probe cannot
+/// disagree. Every emit is a non-blocking queue push (CLAUDE.md §4.7).
+pub struct NodeHealthReporter {
+    stop_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl NodeHealthReporter {
+    /// Start reporting. `heartbeat` is the `node_status` period; `None`
+    /// sends the transitions only. Must be called inside a Tokio runtime.
+    pub fn spawn(
+        hep: Arc<HepTelemetry>,
+        status: StatusFn,
+        readiness: ReadinessFlag,
+        heartbeat: Option<Duration>,
+    ) -> Self {
+        Self::spawn_polling(hep, status, readiness, heartbeat, NODE_HEALTH_POLL)
+    }
+
+    fn spawn_polling(
+        hep: Arc<HepTelemetry>,
+        status: StatusFn,
+        readiness: ReadinessFlag,
+        heartbeat: Option<Duration>,
+        poll: Duration,
+    ) -> Self {
+        // `node_started` goes out here, synchronously, not from the task:
+        // the runtime flips `/ready` right after spawning, and a task that
+        // first ran after the flip would report `ready=true` with no
+        // `node_ready` to follow it.
+        let (st, ready) = (status(), readiness.is_ready());
+        hep.emit_node_health(NodeEvent::Started, &st, ready);
+        let last = (ready, st.draining);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = tokio::spawn(report_node_health(
+            hep, status, readiness, heartbeat, poll, last, stop_rx,
+        ));
+        Self {
+            stop_tx: Some(stop_tx),
+            task: Some(task),
+        }
+    }
+
+    /// Stop reporting: one last check — a drain shorter than a poll would
+    /// otherwise go unreported — then `node_stopping`. Call before the HEP
+    /// worker drains so both reach the wire. Bounded by
+    /// [`NODE_HEALTH_STOP_GRACE`]; a task that overruns it is aborted
+    /// rather than holding up teardown.
+    pub async fn stop(mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(mut task) = self.task.take() {
+            if tokio::time::timeout(NODE_HEALTH_STOP_GRACE, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                warn!(
+                    grace_ms = NODE_HEALTH_STOP_GRACE.as_millis(),
+                    "HEP node-health reporter did not stop within grace; its last lines may be missing"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for NodeHealthReporter {
+    /// A reporter dropped without [`Self::stop`] — a startup error path, a
+    /// test — must not outlive its owner.
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+async fn report_node_health(
+    hep: Arc<HepTelemetry>,
+    status: StatusFn,
+    readiness: ReadinessFlag,
+    heartbeat: Option<Duration>,
+    poll: Duration,
+    mut last: (bool, bool),
+    mut stop_rx: oneshot::Receiver<()>,
+) {
+    let snapshot = || (status(), readiness.is_ready());
+
+    let mut poll_tick = tokio::time::interval(poll);
+    poll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // The first tick completes immediately; `node_started` just covered it.
+    poll_tick.tick().await;
+    let mut beat = heartbeat.map(|period| {
+        let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        beat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        beat
+    });
+
+    loop {
+        tokio::select! {
+            // Sent by `stop`; an `Err` (sender dropped) means the same.
+            _ = &mut stop_rx => break,
+            _ = poll_tick.tick() => {
+                let (st, ready) = snapshot();
+                let now = (ready, st.draining);
+                if let Some(event) = node_transition(last, now) {
+                    hep.emit_node_health(event, &st, ready);
+                }
+                last = now;
+            }
+            _ = next_beat(&mut beat) => {
+                let (st, ready) = snapshot();
+                hep.emit_node_health(NodeEvent::Status, &st, ready);
+            }
+        }
+    }
+
+    let (st, ready) = snapshot();
+    if let Some(event) = node_transition(last, (ready, st.draining)) {
+        hep.emit_node_health(event, &st, ready);
+    }
+    hep.emit_node_health(NodeEvent::Stopping, &st, ready);
+}
+
+/// The next heartbeat tick, or never when the heartbeat is off.
+async fn next_beat(beat: &mut Option<tokio::time::Interval>) {
+    match beat {
+        Some(beat) => {
+            beat.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 /// Filled-in for callers that don't have a real `SocketAddr` handy.
 /// HEP3 requires src/dst chunks; `0.0.0.0:0` is the conventional
 /// placeholder used by Kamailio's `siptrace` and FreeSWITCH's
@@ -511,6 +780,7 @@ pub enum HepBuildError {
 mod tests {
     use super::*;
     use hep_rs::HepSink;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     /// In-memory sink that records every packet, so tests can assert on
@@ -689,6 +959,154 @@ mod tests {
             },
         );
         assert!(empty.contains(" node=\"\" "), "{empty}");
+    }
+
+    fn node_status(draining: bool, active_calls: usize) -> StatusResponse {
+        StatusResponse {
+            version: "9.9.9".into(),
+            uptime_secs: 42,
+            active_calls,
+            registrations: crate::admin::RegistrationsSummary {
+                registered: 1,
+                total: 2,
+            },
+            draining,
+            hep_enabled: true,
+        }
+    }
+
+    /// Every `Log` chunk the capture saw, as (payload, correlation id).
+    fn log_lines(cap: &Capture) -> Vec<(String, Option<String>)> {
+        cap.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.protocol == HepProtocol::Log)
+            .map(|p| {
+                (
+                    String::from_utf8(p.payload.clone()).unwrap(),
+                    p.correlation_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    // Node health is keyed by the node, not a call — and namespaced so it
+    // can never collide with a SIP Call-ID in Homer's search.
+    #[test]
+    fn node_health_chunk_is_keyed_by_node_not_a_call() {
+        let cap = Arc::new(Capture::default());
+        let tel = telemetry_with(cap.clone() as HepSinkHandle);
+
+        tel.emit_node_health(NodeEvent::Status, &node_status(false, 3), true);
+
+        let lines = log_lines(&cap);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1.as_deref(), Some("node:node-a"));
+        assert_eq!(
+            lines[0].0,
+            "node_status node=node-a version=9.9.9 ready=true draining=false \
+             active_calls=3 registrations=1/2 uptime_secs=42"
+        );
+    }
+
+    #[test]
+    fn a_drain_reads_as_draining_alone() {
+        // (ready, draining) before → after.
+        assert_eq!(
+            node_transition((false, false), (true, false)),
+            Some(NodeEvent::Ready)
+        );
+        assert_eq!(
+            node_transition((true, false), (false, true)),
+            Some(NodeEvent::Draining),
+            "a drain flips both; it must not also read as not-ready"
+        );
+        assert_eq!(
+            node_transition((true, false), (false, false)),
+            Some(NodeEvent::NotReady)
+        );
+        assert_eq!(node_transition((true, false), (true, false)), None);
+        assert_eq!(node_transition((false, true), (false, true)), None);
+    }
+
+    /// The first token of each `Log` line, asserting every one is keyed by
+    /// the node.
+    fn node_events(cap: &Capture) -> Vec<String> {
+        log_lines(cap)
+            .into_iter()
+            .map(|(line, correlation)| {
+                assert_eq!(correlation.as_deref(), Some("node:node-a"), "{line}");
+                line.split(' ').next().unwrap_or_default().to_string()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reporter_ships_start_ready_heartbeat_draining_and_stopping() {
+        let cap = Arc::new(Capture::default());
+        let tel = Arc::new(telemetry_with(cap.clone() as HepSinkHandle));
+        let draining = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&draining);
+        let status: StatusFn = Arc::new(move || node_status(flag.load(Ordering::SeqCst), 0));
+        let readiness = ReadinessFlag::new();
+        let reporter = NodeHealthReporter::spawn_polling(
+            tel,
+            status,
+            readiness.clone(),
+            Some(Duration::from_millis(60)),
+            Duration::from_millis(10),
+        );
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        readiness.mark_ready();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // A drain faster than a poll: `stop` must still report it.
+        draining.store(true, Ordering::SeqCst);
+        readiness.mark_not_ready();
+        reporter.stop().await;
+
+        let events = node_events(&cap);
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("node_started"),
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("node_stopping"),
+            "{events:?}"
+        );
+        let count = |e: &str| events.iter().filter(|x| *x == e).count();
+        assert_eq!(count("node_ready"), 1, "{events:?}");
+        assert_eq!(count("node_draining"), 1, "{events:?}");
+        assert_eq!(
+            count("node_not_ready"),
+            0,
+            "a drain is not not-ready: {events:?}"
+        );
+        assert!(count("node_status") >= 1, "a heartbeat fired: {events:?}");
+        let at = |e: &str| events.iter().position(|x| x == e);
+        assert!(at("node_ready") < at("node_draining"), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_off_sends_transitions_only() {
+        let cap = Arc::new(Capture::default());
+        let tel = Arc::new(telemetry_with(cap.clone() as HepSinkHandle));
+        let status: StatusFn = Arc::new(|| node_status(false, 0));
+        let reporter = NodeHealthReporter::spawn_polling(
+            tel,
+            status,
+            ReadinessFlag::new(),
+            None,
+            Duration::from_millis(10),
+        );
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        reporter.stop().await;
+
+        assert_eq!(node_events(&cap), ["node_started", "node_stopping"]);
     }
 
     /// Render `/metrics` under a per-test recorder, the same way

@@ -518,6 +518,11 @@ pub struct HepConfig {
     /// Bounded queue capacity between producer and worker. Default
     /// `256` (matches `hep_rs::DEFAULT_QUEUE_CAPACITY`).
     pub queue_capacity: usize,
+    /// Node-health `node_status` heartbeat period
+    /// (`node_status_interval_secs`, default 60 s). `None` = heartbeat
+    /// off; the node-health transition chunks ship whenever HEP is
+    /// enabled regardless.
+    pub node_status_interval: Option<std::time::Duration>,
 }
 
 /// Resolved CDR plan. The daemon translates this into actual
@@ -1449,6 +1454,12 @@ pub enum CompileError {
 
     #[error("[hep].capture_id is required when [hep].enabled = true")]
     HepCaptureIdRequired,
+
+    #[error(
+        "[hep].node_status_interval_secs = {0} is below the 5 s floor \
+         (use 0 to turn the node-health heartbeat off)"
+    )]
+    HepNodeStatusIntervalTooShort(u64),
 
     #[error(
         "[sip].min_session_expires_secs = {0} is below the RFC 4028 floor of 90 \
@@ -3748,7 +3759,28 @@ fn compile_hep(raw: RawHep) -> Result<HepConfig, CompileError> {
         // it here rather than depending on hep-rs from this crate
         // (config has a deliberately minimal dep graph).
         queue_capacity: raw.queue_capacity.unwrap_or(256),
+        node_status_interval: compile_node_status_interval(raw.node_status_interval_secs)?,
     })
+}
+
+/// Shortest `[hep].node_status_interval_secs` accepted. Below it every
+/// node would put a packet every second or two into Homer's storage for a
+/// signal that changes on the scale of minutes; refused rather than
+/// silently raised (CLAUDE.md §4.6).
+const MIN_NODE_STATUS_INTERVAL_SECS: u64 = 5;
+
+/// `[hep].node_status_interval_secs` → heartbeat period: default 60 s,
+/// `0` = off, below [`MIN_NODE_STATUS_INTERVAL_SECS`] fails the load.
+fn compile_node_status_interval(
+    secs: Option<u64>,
+) -> Result<Option<std::time::Duration>, CompileError> {
+    match secs.unwrap_or(60) {
+        0 => Ok(None),
+        s if s < MIN_NODE_STATUS_INTERVAL_SECS => {
+            Err(CompileError::HepNodeStatusIntervalTooShort(s))
+        }
+        s => Ok(Some(std::time::Duration::from_secs(s))),
+    }
 }
 
 /// Compile `[conference]` (0.7.0). Validation per CLAUDE.md §4.6 —

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Node health in Homer.** With `[hep]` shipping to a collector, each node now sends its
+  own health as HEP `Log` (0x64) chunks keyed by `node:<[node].id>`, so Homer shows a
+  per-node timeline: `node_started` at boot, `node_ready` / `node_not_ready` /
+  `node_draining` as `/ready` and the drain flag change, a `node_status` heartbeat every
+  `[hep].node_status_interval_secs` (new; default 60, `0` = off, below 5 fails the load),
+  and `node_stopping` at teardown, queued before the HEP worker drains. Each line carries
+  version, ready, draining, active calls, registrations and uptime — the
+  `GET /admin/v1/status` snapshot plus `/ready`, read from the same sources so they cannot
+  disagree. New counter `siphon_ai_hep_node_events_total{event}`. Format in HEP.md's new
+  *Node health Log chunks* section.
+
 ## [0.51.1] - 2026-09-11
 
 ### Fixed

@@ -1427,6 +1427,11 @@ pub struct RawHep {
     /// volumes. Default `256` (per `hep-rs::DEFAULT_QUEUE_CAPACITY`).
     #[serde(default)]
     pub queue_capacity: Option<usize>,
+    /// Seconds between the node-health `node_status` heartbeat chunks
+    /// (0.52.0). `0` turns the heartbeat off; the transition chunks are
+    /// sent regardless. Default `60`; values below `5` fail the load.
+    #[serde(default)]
+    pub node_status_interval_secs: Option<u64>,
 }
 
 /// `[bridge]` — daemon-wide bridge defaults.
