@@ -4393,6 +4393,7 @@ dependencies = [
  "forge-sdp",
  "forge-webrtc",
  "futures",
+ "hep-rs",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",

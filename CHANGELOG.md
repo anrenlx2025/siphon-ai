@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Calls now ship the HEP lifecycle Log chunks HEP.md has always described**
+  ([#604](https://github.com/thevoiceguy/siphon-ai/issues/604)). `HepTelemetry::emit_log`'s
+  only caller was the `POST /admin/v1/hep/test` probe, so a call produced SIP, RTCP,
+  RTP-QoS and CDR chunks and no `HepProtocol::Log` (0x64) at all — Homer's call timeline
+  was empty, and a node without `[admin]` could not produce a type-100 packet. Every
+  bridged call (inbound, and outbound once answered) now ships a `call_started` line and
+  a `call_ended` line carrying the termination cause and duration, correlated by SIP
+  Call-ID so they thread onto the ladder. The bridge id rides the text for the join to the
+  CDR and logs. Format in HEP.md's new *Call lifecycle Log chunks* section.
+
 ## [0.51.0] - 2026-09-03
 
 ### Added

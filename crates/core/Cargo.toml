@@ -88,3 +88,6 @@ serde_json.workspace                  = true
 forge-rtp.workspace                   = true
 metrics-exporter-prometheus.workspace = true
 async-trait.workspace                 = true
+# `tests/acceptor_hep.rs` captures the HEP packet stream with its own
+# `HepSink`; already in the tree via siphon-ai-telemetry.
+hep-rs.workspace                      = true

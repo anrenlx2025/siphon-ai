@@ -23,7 +23,7 @@ one queue and one UDP socket through the daemon-wide `HepSink`:
    │              │     HepProtocol::RtpQos (vendor chunk type 0x20)
    └──────────────┘
    ┌──────────────┐
-   │ siphon-ai    │ ──► Per-call lifecycle log lines
+   │ siphon-ai    │ ──► call_started / call_ended text line per call
    │ (telemetry)  │     HepProtocol::Log (chunk type 0x64)
    │              │ ──► Full CDR JSON when a call ends
    │              │     HepProtocol::Cdr (chunk type 0x65)
@@ -139,12 +139,37 @@ For a `basic_call_then_bye` SIPp scenario (INVITE / 100 / 200 / ACK / BYE /
 
 - A ladder diagram of all six SIP messages, keyed by `Call-ID`.
 - A timeline of the SiphonAI Log chunks (`call_started`, `call_ended`,
-  termination cause).
+  termination cause) — see below.
 - The CDR JSON as an inspectable record at call end.
 
 When the scenario also exchanges RTP (`uac_with_rtp.xml`, post-v1), the
 QoS panel populates from forge's per-RR `RtpQos` chunks: jitter,
 fractional loss, cumulative loss, the SSRC of each direction.
+
+## Call lifecycle Log chunks (0x64)
+
+Every bridged call — inbound, and outbound once the callee answers —
+ships two `HepProtocol::Log` chunks, correlated by SIP `Call-ID`. Each is
+one `key=value` text line:
+
+```text
+call_started call_id=siphon-4380c265… direction=inbound node=node-a route=main_reception from=+13125551234 to=5000
+call_ended call_id=siphon-4380c265… direction=inbound node=node-a cause=remote_bye duration_ms=110234
+```
+
+`call_id` is the bridge id (the CDR's `call_id`, the webhooks' `call_id`,
+the daemon logs' `call_id` span field), so the line is the join from
+Homer's view to everything else. `route` is the matched route, or the
+gateway for an outbound leg — the CDR's `route`. `cause` and
+`duration_ms` are the CDR's `termination.cause` and `duration_ms`. A
+value that is not a single plain token (a display name with a space, say)
+is double-quoted with escapes, so the line always splits cleanly.
+
+Calls rejected before bridging (no route, admission, STIR/SHAKEN gate) and
+outbound attempts that never connect ship no Log chunks — their SIP
+ladder already says what happened. Through 0.51.0 no lifecycle chunk was
+emitted at all; the only type-100 packet a node sent was the
+`POST /admin/v1/hep/test` probe (#604).
 
 ## STIR/SHAKEN verstat chunk (0x66)
 
