@@ -483,6 +483,9 @@ async fn run_room(
             max_buffer_frames: MAX_BUFFER_SECONDS * (1000 / FRAME_MS as usize),
             recording_base_dir: None,
             recording_root_jail: None,
+            // Drain-on-read, the pre-0.3.0 behaviour: this loop is the
+            // mixer's only consumer, one `mix*` per member per tick.
+            frame_clock: false,
         },
     ) {
         Ok(m) => m,

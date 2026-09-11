@@ -4644,6 +4644,10 @@ impl BridgingAcceptor {
                 vad: resolve_vad(&self.defaults, route),
             })
             .await?;
+        // The forge session is keyed by the bridge id; key its HEP RTCP /
+        // QoS chunks by SIP Call-ID instead, so they thread onto Homer's
+        // call view beside the ladder and the CDR (#603).
+        session.set_hep_correlation_id(sip_call_id.clone());
 
         // DTLS-SRTP post-negotiation: patch the answer back to SAVPF
         // with our fingerprint + setup, install the DTLS leg on the
@@ -5014,6 +5018,8 @@ impl BridgingAcceptor {
                 return Ok(());
             }
         };
+        // HEP RTCP / QoS chunks by SIP Call-ID, as on the early-offer path (#603).
+        offer.session.set_hep_correlation_id(sip_call_id.clone());
 
         // When offering DTLS, patch the plaintext offer to a DTLS-SRTP
         // offer (SAVPF + our fingerprint + setup:actpass). Failure rolls

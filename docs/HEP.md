@@ -40,6 +40,14 @@ with the right protocol byte and forward it to the sink. All three carry
 the same SIP `Call-ID` as the correlation key, which is what Homer's UI
 threads together into one call view.
 
+forge keys a media session by siphon-ai's bridge id (`siphon-…`), not the
+Call-ID, so siphon-ai hands each session the Call-ID as its HEP
+correlation id (`MediaSession::set_hep_correlation_id`) — inbound at
+accept, outbound as soon as the INVITE names it, before any RTCP can flow.
+Through 0.51.0 it didn't, and a call's RTCP / RTP-QoS chunks landed under
+the bridge id, off the call view (#603). Browser (WebRTC) legs emit no
+forge HEP chunks.
+
 ## Best-effort, always
 
 HEP emission must never block the audio path (CLAUDE.md §4.7). Concretely:

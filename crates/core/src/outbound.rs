@@ -248,6 +248,9 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 return Err(anyhow::anyhow!("delayed-offer answer build failed: {msg}"));
             }
         };
+        // Key this leg's HEP RTCP / QoS chunks by SIP Call-ID so they
+        // thread onto Homer's call view beside the ladder (#603).
+        accepted.session.set_hep_correlation_id(sip_call_id.clone());
 
         // Post-negotiation: patch the answer back to the secure profile and
         // bring up keys. DTLS-SRTP installs our fingerprint + starts the
@@ -518,6 +521,15 @@ impl OutboundOriginator {
                 return Err(OutboundError::Transport(e.to_string()));
             }
         };
+        // The Call-ID exists only now that the INVITE does — after the
+        // session, which the offer needed. Set before awaiting the final
+        // response so early-media RTCP is keyed by it too (#603). Stable
+        // across a 401/407 retry, as `place_delayed` relies on.
+        if let Some(sip_call_id) = handle.invite_request().await.headers().get_smol("Call-ID") {
+            offer
+                .session
+                .set_hep_correlation_id(sip_call_id.to_string());
+        }
 
         // (3) Await the final response (the UAC drains provisionals + sends
         //     ACK on 2xx itself).
@@ -1137,6 +1149,11 @@ mod tests {
             media_result.accepted.session.state().await,
             forge_engine::SessionState::Active,
             "delayed-offer answer path must start RTP forwarding (Initializing → Active)"
+        );
+        // #603: RTCP / QoS chunks key on the SIP Call-ID, not the forge id.
+        assert_eq!(
+            media_result.accepted.session.hep_correlation_id(),
+            sip_call_id
         );
     }
 

@@ -167,6 +167,15 @@ async fn prepare_happy_path_produces_runnable_call() {
 
     // (e) The forge session and tap are alive.
     let forge_call_id = prepared.forge_call_id.clone();
+    // …and its HEP RTCP / QoS chunks key on the SIP Call-ID, not the
+    // bridge id the session is named by (#603).
+    assert_eq!(
+        session_mgr
+            .get_session(&forge_call_id)
+            .expect("session exists")
+            .hep_correlation_id(),
+        "abc-123@pbx.example.com"
+    );
     assert!(session_mgr.get_session(&forge_call_id).is_some());
     assert!(bridge_mgr.has_bridge(&forge_call_id));
 }
