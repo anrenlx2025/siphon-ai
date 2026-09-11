@@ -1166,6 +1166,9 @@ impl Runtime {
             // timer and then stopped refreshing, instead of holding the
             // call — and its billing — open indefinitely.
             service = service.with_session_timers(acceptor.session_timers());
+            // Answered outbound legs ship the same call_started /
+            // call_ended HEP Log chunks inbound calls do (#604).
+            service = service.with_hep_telemetry(hep_telemetry.clone());
             // Outbound bots can join conferences too (§9.1 — a room is
             // composed of any active calls). Share the same registries.
             service = service.with_control_registry(control_registry.clone());

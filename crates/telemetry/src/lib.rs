@@ -41,7 +41,9 @@ pub use admin::{
     RegistrationRow, RetrieveRequest,
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
-pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, SinkHandle};
+pub use hep::{
+    CallLifecycle, HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, SinkHandle,
+};
 pub use http::{AdminServer, AdminTlsConfigFn, ObservabilityServer};
 pub use log_filter::{has_global_level, with_floor, LogFilterError, LogFilterHandle, LOG_FLOOR};
 pub use otel::{OtelConfig, OtelError, OtelTelemetry, OTEL_SCOPE};

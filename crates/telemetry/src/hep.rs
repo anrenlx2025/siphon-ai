@@ -6,10 +6,12 @@
 //! forge-media), and exposes a small SiphonAI-owned API for the
 //! application-layer chunks Homer also renders:
 //!
-//! - `HepProtocol::Log` (0x64): one short text line per call lifecycle
-//!   event (start, end, register state change). Carries the call_id
-//!   as the correlation chunk so Homer threads it through the same
-//!   SIP / RTCP view. See [`HepTelemetry::emit_log`].
+//! - `HepProtocol::Log` (0x64): one short text line when a bridged call
+//!   starts and one when it ends, inbound and outbound alike. Carries
+//!   the SIP Call-ID as the correlation chunk so Homer threads it onto
+//!   the call's SIP ladder. See [`HepTelemetry::emit_call_lifecycle`];
+//!   the admin `POST /admin/v1/hep/test` probe uses the lower-level
+//!   [`HepTelemetry::emit_log`].
 //!
 //! `HepProtocol::Cdr` (0x65) chunks — the full CDR JSON emitted when a
 //! call ends — are composed by `siphon-ai-cdr`'s `HepCdrSink`, which
@@ -339,6 +341,34 @@ impl HepTelemetry {
         });
     }
 
+    /// Emit one call lifecycle moment as a `Log` chunk correlated by the
+    /// SIP Call-ID, so it lands on the same Homer call view as the SIP
+    /// ladder and the CDR (#604). `call_id` is the bridge id
+    /// (`siphon-…`), carried in the text so the line can be joined to the
+    /// CDR, webhooks, and daemon logs; `direction` is `inbound` or
+    /// `outbound`.
+    ///
+    /// The payload is one `key=value` line led by the event name —
+    /// `call_started call_id=… direction=… node=… route=… from=… to=…`
+    /// or `call_ended call_id=… direction=… node=… cause=… duration_ms=…`
+    /// — with `cause` the CDR's `termination.cause` label. Values that
+    /// are not a single plain token are quoted and escaped: `from`/`to`
+    /// come off the wire, and an embedded newline must not forge a second
+    /// line in the collector.
+    pub fn emit_call_lifecycle(
+        &self,
+        sip_call_id: &str,
+        call_id: &str,
+        direction: &str,
+        event: CallLifecycle<'_>,
+    ) {
+        self.emit_log(
+            &call_lifecycle_line(&self.node_id, call_id, direction, event),
+            Some(sip_call_id),
+            None,
+        );
+    }
+
     /// Emit a STIR/SHAKEN verdict as a HEP3 chunk-type 102
     /// (`HepProtocol::Verstat`). `payload` is the verdict already
     /// serialized (siphon-ai serializes the `VerificationResult` as JSON,
@@ -391,6 +421,72 @@ impl HepTelemetry {
     // Shutdown lives on [`HepWorkerHandle::shutdown`] now; the
     // telemetry handle itself is share-by-Arc and doesn't need a
     // teardown method.
+}
+
+/// The call lifecycle moments [`HepTelemetry::emit_call_lifecycle`]
+/// ships — the timeline `docs/HEP.md` describes under *What appears in
+/// Homer's UI*.
+#[derive(Debug, Clone, Copy)]
+pub enum CallLifecycle<'a> {
+    /// The call is bridged and its controller is starting. `route` is
+    /// the matched route (inbound) or gateway (outbound) — the CDR's
+    /// `route` field.
+    Started {
+        route: &'a str,
+        from: &'a str,
+        to: &'a str,
+    },
+    /// The call has been torn down. `cause` is the CDR
+    /// `termination.cause` label; `duration_ms` the CDR's duration.
+    Ended { cause: &'a str, duration_ms: u64 },
+}
+
+/// Compose the text payload for [`HepTelemetry::emit_call_lifecycle`].
+fn call_lifecycle_line(
+    node_id: &str,
+    call_id: &str,
+    direction: &str,
+    event: CallLifecycle<'_>,
+) -> String {
+    let mut line = String::with_capacity(160);
+    line.push_str(match event {
+        CallLifecycle::Started { .. } => "call_started",
+        CallLifecycle::Ended { .. } => "call_ended",
+    });
+    push_field(&mut line, "call_id", call_id);
+    push_field(&mut line, "direction", direction);
+    push_field(&mut line, "node", node_id);
+    match event {
+        CallLifecycle::Started { route, from, to } => {
+            push_field(&mut line, "route", route);
+            push_field(&mut line, "from", from);
+            push_field(&mut line, "to", to);
+        }
+        CallLifecycle::Ended { cause, duration_ms } => {
+            push_field(&mut line, "cause", cause);
+            push_field(&mut line, "duration_ms", &duration_ms.to_string());
+        }
+    }
+    line
+}
+
+/// Append ` key=value`, quoting (`{:?}`) any value that isn't one plain
+/// printable-ASCII token, so the line stays unambiguous to split.
+fn push_field(line: &mut String, key: &str, value: &str) {
+    use std::fmt::Write as _;
+    line.push(' ');
+    line.push_str(key);
+    line.push('=');
+    let plain = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'=');
+    if plain {
+        line.push_str(value);
+    } else {
+        // Writing to a String cannot fail.
+        let _ = write!(line, "{value:?}");
+    }
 }
 
 /// Filled-in for callers that don't have a real `SocketAddr` handy.
@@ -510,6 +606,89 @@ mod tests {
             Some("abc-123@pbx.example.com")
         );
         assert_eq!(pkt.payload, payload);
+    }
+
+    // #604: lifecycle chunks correlate by SIP Call-ID (the key Homer's
+    // call view threads on), not the bridge id — which rides the text.
+    #[test]
+    fn call_lifecycle_chunks_correlate_by_sip_call_id() {
+        let cap = Arc::new(Capture::default());
+        let tel = telemetry_with(cap.clone() as HepSinkHandle);
+
+        tel.emit_call_lifecycle(
+            "abc-123@pbx.example.com",
+            "siphon-4380c265",
+            "inbound",
+            CallLifecycle::Started {
+                route: "main_reception",
+                from: "+13125551234",
+                to: "5000",
+            },
+        );
+        tel.emit_call_lifecycle(
+            "abc-123@pbx.example.com",
+            "siphon-4380c265",
+            "inbound",
+            CallLifecycle::Ended {
+                cause: "remote_bye",
+                duration_ms: 110_234,
+            },
+        );
+
+        let seen = cap.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for pkt in seen.iter() {
+            assert_eq!(pkt.protocol, HepProtocol::Log);
+            assert_eq!(pkt.capture_id, 2002);
+            assert_eq!(pkt.capture_password.as_deref(), Some("homer-secret"));
+            assert_eq!(
+                pkt.correlation_id.as_deref(),
+                Some("abc-123@pbx.example.com")
+            );
+        }
+        assert_eq!(
+            std::str::from_utf8(&seen[0].payload).unwrap(),
+            "call_started call_id=siphon-4380c265 direction=inbound node=node-a \
+             route=main_reception from=+13125551234 to=5000"
+        );
+        assert_eq!(
+            std::str::from_utf8(&seen[1].payload).unwrap(),
+            "call_ended call_id=siphon-4380c265 direction=inbound node=node-a \
+             cause=remote_bye duration_ms=110234"
+        );
+    }
+
+    // `from`/`to` are caller-controlled: a newline must not forge a
+    // second line, and a space or `=` must not forge a field.
+    #[test]
+    fn lifecycle_values_that_are_not_plain_tokens_are_quoted() {
+        let line = call_lifecycle_line(
+            "node-a",
+            "siphon-1",
+            "inbound",
+            CallLifecycle::Started {
+                route: "r",
+                from: "Alice Smith <sip:a@b>",
+                to: "x\ncall_ended cause=forged",
+            },
+        );
+        assert_eq!(
+            line,
+            "call_started call_id=siphon-1 direction=inbound node=node-a route=r \
+             from=\"Alice Smith <sip:a@b>\" to=\"x\\ncall_ended cause=forged\""
+        );
+        assert!(!line.contains('\n'));
+        // An empty value still reads as a present-but-empty field.
+        let empty = call_lifecycle_line(
+            "",
+            "siphon-1",
+            "outbound",
+            CallLifecycle::Ended {
+                cause: "local_shutdown",
+                duration_ms: 0,
+            },
+        );
+        assert!(empty.contains(" node=\"\" "), "{empty}");
     }
 
     /// Render `/metrics` under a per-test recorder, the same way

@@ -90,8 +90,9 @@ use siphon_ai_security::MinAttestation;
 use siphon_ai_sip_glue::{CallAcceptor, DialogTerminator, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
-    HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, DELAYED_OFFER_TOTAL,
-    INVITES_TOTAL, RECORDINGS_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
+    CallLifecycle, HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS,
+    DELAYED_OFFER_TOTAL, INVITES_TOTAL, RECORDINGS_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS,
+    VERSTAT_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
@@ -4010,6 +4011,22 @@ impl BridgingAcceptor {
         tokio::spawn(async move {
             webhook_for_start.emit(start_event).await;
         });
+        // Homer's call timeline (#604): the start line here, the end line
+        // in the cleanup task, both keyed by SIP Call-ID so they thread
+        // onto the ladder. Queues and returns (§4.7).
+        let hep = self.hep.clone();
+        if let Some(hep) = hep.as_deref() {
+            hep.emit_call_lifecycle(
+                &call_start.sip_call_id,
+                call_start.bridge_call_id.as_str(),
+                "inbound",
+                CallLifecycle::Started {
+                    route: &call_start.route,
+                    from: &call_start.from,
+                    to: &call_start.to,
+                },
+            );
+        }
 
         let bridge_call_id = prepared.bridge_call_id.clone();
         let forge_call_id = prepared.forge_call_id.clone();
@@ -4100,6 +4117,17 @@ impl BridgingAcceptor {
                     (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
                 let duration_secs = duration_ms as f64 / 1000.0;
                 record_call_ended(view.cause, duration_secs);
+                if let Some(hep) = hep.as_deref() {
+                    hep.emit_call_lifecycle(
+                        &call_start.sip_call_id,
+                        call_start.bridge_call_id.as_str(),
+                        "inbound",
+                        CallLifecycle::Ended {
+                            cause: termination_label(view.cause),
+                            duration_ms,
+                        },
+                    );
+                }
                 // Includes `blocked`: a consent announcement that fails
                 // stops the recording before it starts, which produced no
                 // metric at all before #440 — a bad prompt file could

@@ -34,9 +34,9 @@ use siphon_ai_media_glue::{
     rewrite_sdp_direction, MediaDirection, OutboundOfferRequest, OutboundSrtp, TapOptions,
 };
 use siphon_ai_telemetry::{
-    OriginateRejection, OriginateRequest, OutboundOriginateHandle, CALLS_ACTIVE,
-    OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL, RECORDINGS_TOTAL,
-    SESSION_REFRESH_STOPPED_TOTAL, SESSION_REFRESH_TOTAL,
+    CallLifecycle, HepTelemetry, OriginateRejection, OriginateRequest, OutboundOriginateHandle,
+    CALLS_ACTIVE, OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
+    RECORDINGS_TOTAL, SESSION_REFRESH_STOPPED_TOTAL, SESSION_REFRESH_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
@@ -257,6 +257,9 @@ pub struct OutboundService {
     /// so the store grew by one entry per originated call for the life of
     /// the process. `None` in tests / when the runtime never installs one.
     dialog_reaper: Option<crate::dialog_reaper::DialogReaper>,
+    /// HEP/Homer telemetry, handed to each answered leg for its lifecycle
+    /// Log chunks (#604). `None` when `[hep]` is off.
+    hep: Option<Arc<HepTelemetry>>,
 }
 
 impl OutboundService {
@@ -288,7 +291,16 @@ impl OutboundService {
             session_timers: None,
             drain: None,
             dialog_reaper: None,
+            hep: None,
         }
+    }
+
+    /// Install the HEP/Homer telemetry handle so answered legs ship the
+    /// `call_started` / `call_ended` Log chunks the inbound path does
+    /// (#604). `None` (the default) ships nothing.
+    pub fn with_hep_telemetry(mut self, hep: Option<Arc<HepTelemetry>>) -> Self {
+        self.hep = hep;
+        self
     }
 
     /// Share the inbound acceptor's RFC 4028 expiry so outbound legs get
@@ -531,6 +543,7 @@ impl OutboundOriginateHandle for OutboundService {
         let call_registry = self.call_registry.clone();
         let park = self.park.clone();
         let dialog_reaper = self.dialog_reaper.clone();
+        let hep = self.hep.clone();
         // WS reconnect (0.7.3) — outbound legs reconnect on the same daemon
         // defaults as inbound; extracted before the spawn (no `self` inside).
         let ws_reconnect_enabled = self.defaults.ws_reconnect_enabled;
@@ -617,6 +630,7 @@ impl OutboundOriginateHandle for OutboundService {
                         barge_in_mode,
                         ws_failure_prompt,
                         dialog_reaper,
+                        hep,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -719,6 +733,9 @@ struct OutboundCallContext {
     /// `None` leaves the dialog in the shared store forever, exactly as
     /// before — which is what the CDR-shape tests below expect.
     dialog_reaper: Option<crate::dialog_reaper::DialogReaper>,
+    /// Ships this leg's `call_started` / `call_ended` HEP Log chunks
+    /// (#604). `None` when `[hep]` is off.
+    hep: Option<Arc<HepTelemetry>>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -747,6 +764,20 @@ async fn run_call(
     // outbound-heavy node showed `siphon_ai_calls_active` near zero
     // (issue #373). Balanced by `record_call_ended` in the teardown below.
     metrics::gauge!(CALLS_ACTIVE).increment(1.0);
+    // Homer's call timeline (#604) — the inbound acceptor emits the same
+    // pair. The route slot carries the gateway, as the CDR's does.
+    if let Some(hep) = ctx.hep.as_deref() {
+        hep.emit_call_lifecycle(
+            &sip_call_id,
+            ctx.bridge_id.as_str(),
+            "outbound",
+            CallLifecycle::Started {
+                route: &ctx.gateway,
+                from: &ctx.from,
+                to: &ctx.to,
+            },
+        );
+    }
     // Answered → this leg is a valid attended-transfer consult target
     // until it ends. Snapshot is enough: the transfer task only reads
     // the dialog's id and remote target (DEV_PLAN_0.6.1 §2.1).
@@ -1200,6 +1231,17 @@ async fn run_call(
     // `cause="ws_disconnect"` alerting was blind to outbound WS crashes
     // (issue #373).
     record_call_ended(view.cause, record.duration_ms as f64 / 1000.0);
+    if let Some(hep) = ctx.hep.as_deref() {
+        hep.emit_call_lifecycle(
+            &sip_call_id,
+            ctx.bridge_id.as_str(),
+            "outbound",
+            CallLifecycle::Ended {
+                cause: termination_label(view.cause),
+                duration_ms: record.duration_ms,
+            },
+        );
+    }
     // Spool the finalized recording for object-storage upload (0.25.0
     // machinery, outbound wiring 0.26.0) — mirrors the inbound acceptor.
     if let (Some(upload), Some(rec)) = (ctx.recording_upload.as_ref(), view.recording.as_ref()) {
@@ -1509,6 +1551,7 @@ mod tests {
             barge_in_mode: siphon_ai_bridge::BargeInModeInfo::AutoClear,
             ws_failure_prompt: None,
             dialog_reaper: None,
+            hep: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,
