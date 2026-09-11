@@ -32,6 +32,9 @@ use siphon_ai_bridge::{
 
 #[derive(Debug, Default, Clone)]
 struct CapturedRequest {
+    /// Set by the handshake callback, so a test can wait for the capture
+    /// rather than guess how long the upgrade takes.
+    handshake_seen: bool,
     subprotocol: Option<String>,
     authorization: Option<String>,
     user_agent: Option<String>,
@@ -77,6 +80,23 @@ impl ServerHandle {
     fn ws_url(&self) -> String {
         format!("ws://{}", self.addr)
     }
+
+    /// The upgrade request's headers, once the handshake callback has run.
+    ///
+    /// Polls rather than sleeping a fixed interval: a 50 ms sleep raced
+    /// the upgrade on a loaded CI runner and read the capture while it was
+    /// still all-`None`. The 5 s deadline only matters if the client never
+    /// connects, and then the caller's assertion fails on the empty capture.
+    async fn captured_after_handshake(&self) -> CapturedRequest {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let captured = self.captured.lock().clone();
+            if captured.handshake_seen || tokio::time::Instant::now() >= deadline {
+                return captured;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 async fn spawn_server(opts: ServerOpts) -> ServerHandle {
@@ -109,6 +129,7 @@ async fn spawn_server(opts: ServerOpts) -> ServerHandle {
             move |req: &HsRequest, mut resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
                 // Capture interesting headers for assertion.
                 let mut c = captured_for_callback.lock();
+                c.handshake_seen = true;
                 c.subprotocol = req
                     .headers()
                     .get("sec-websocket-protocol")
@@ -305,10 +326,7 @@ async fn upgrade_carries_subprotocol_user_agent_and_call_id() {
         chans,
     ));
 
-    // Give the handshake time to complete + start to be sent.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let captured = server.captured.lock().clone();
+    let captured = server.captured_after_handshake().await;
     assert_eq!(captured.subprotocol.as_deref(), Some(WS_SUBPROTOCOL));
     assert_eq!(captured.siphon_call_id.as_deref(), Some("siphon-test"));
     assert!(
@@ -360,9 +378,7 @@ async fn trace_context_propagates_as_upgrade_headers_and_start_field() {
         chans,
     ));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let captured = server.captured.lock().clone();
+    let captured = server.captured_after_handshake().await;
     assert_eq!(
         captured.traceparent.as_deref(),
         Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
@@ -403,9 +419,12 @@ async fn auth_header_forwarded_verbatim_bearer() {
 
     let conn = tokio::spawn(connect_and_run(cfg, fixture_start("c"), chans));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        server.captured.lock().authorization.as_deref(),
+        server
+            .captured_after_handshake()
+            .await
+            .authorization
+            .as_deref(),
         Some("Bearer s3cret"),
     );
 
@@ -430,9 +449,12 @@ async fn auth_header_forwarded_verbatim_basic() {
 
     let conn = tokio::spawn(connect_and_run(cfg, fixture_start("c"), chans));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        server.captured.lock().authorization.as_deref(),
+        server
+            .captured_after_handshake()
+            .await
+            .authorization
+            .as_deref(),
         Some("Basic dXNlcjpwYXNz"),
     );
 

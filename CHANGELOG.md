@@ -18,6 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `call_ended` line carrying the termination cause and duration, correlated by SIP
   Call-ID so they thread onto the ladder. The bridge id rides the text for the join to the
   CDR and logs. Format in HEP.md's new *Call lifecycle Log chunks* section.
+- **HEP RTCP and RTP-QoS chunks now thread onto Homer's call view**
+  ([#603](https://github.com/thevoiceguy/siphon-ai/issues/603)). forge-media stamped them
+  with its session id, which is siphon-ai's bridge id (`siphon-…`), while the SIP and CDR
+  chunks carry the SIP Call-ID — so Homer showed a call's ladder and CDR but none of its
+  RTCP or QoS, and the only way to them was to read `call_id` out of the CDR and search
+  by that. Every forge session is now given the SIP Call-ID as its HEP correlation id
+  (forge-media #154, `MediaSession::set_hep_correlation_id`): inbound at accept (early and
+  delayed offer), outbound as soon as the INVITE names the Call-ID — before the final
+  response, so early-media RTCP is covered too. Browser (WebRTC) legs emit no forge HEP
+  chunks and are unchanged.
+
+### Changed
+
+- **forge-media v2026.09.02 → v2026.09.10.1, siphon-rs v2026.09.03 → v2026.09.05.** The
+  forge tag carries #154 above (forge-engine 0.6.0). siphon-rs moves with it because
+  forge-sdp now pins `sip-sdp` at v2026.09.05, and staying behind would link two copies of
+  the SDP negotiator; that siphon-rs release is only sip-sdp 0.3.2 (`RTP/AVPF` parsed as
+  its own profile). The forge range also brings forge-mixer 0.4.0, whose new
+  `MixerOptions::frame_clock` the conference room sets `false` to keep the drain-on-read
+  mixing it always had. The rest is video-conferencing work (forge-rtp 0.6.0,
+  forge-webrtc 0.6.0) in APIs siphon-ai does not call; no wire behaviour changes.
 
 ## [0.51.0] - 2026-09-03
 

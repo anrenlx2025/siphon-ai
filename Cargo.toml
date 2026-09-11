@@ -149,7 +149,13 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # impossible type mismatches.
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-09-03 **v2026.08.25** → **v2026.09.03** = siphon-rs #130 (issue
+# Bumped 2026-09-10 **v2026.09.03** → **v2026.09.05**, in lockstep with the
+# forge-media bump below (siphon-ai #603): forge-sdp now pins `sip-sdp` at
+# v2026.09.05, and a different tag here would link a second copy of the SDP
+# negotiator. The release is sip-sdp 0.3.2 alone (siphon-rs #132): `RTP/AVPF`
+# parses as its own profile, and protocol tokens match whole rather than by
+# prefix. Nothing else in the tag, and forge v2026.09.10.1 embeds it.
+# (Prior: 2026-09-03 **v2026.08.25** → **v2026.09.03** = siphon-rs #130 (issue
 # #129, filed for FCP's cascaded conferencing and consumed here as the SIP
 # mutual-TLS surface): the TLS listener can request and verify a client
 # certificate (`load_rustls_server_config_with_client_auth`), an outbound
@@ -162,7 +168,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # listener that never asks for a certificate behaves exactly as before.
 # What this project does with it: `[sip.tls].client_ca` + `client_auth`,
 # `[sip.tls_client].client_cert` + `client_key`, and the `peer_cert_san`
-# route match key.
+# route match key.)
 # (Prior: 2026-08-25 **v2026.08.24.1** → **v2026.08.25** — sip-uas 0.5.0,
 # `on_register` receives the TransportContext.)
 # Bumped 2026-08-21 **v2026.08.20.1** → **v2026.08.21** = siphon-rs #121
@@ -337,32 +343,32 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03", features = ["tls", "ws"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-registrar   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05", features = ["tls", "ws"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-registrar   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.05" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -373,9 +379,35 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
 # forge-media is pinned to a **release tag** (RELEASING.md, adopted
-# 2026-08-24). Bumped 2026-09-02 **v2026.08.26 → v2026.09.02**, a
-# routine roll-up: nothing in it was asked for by this project, and
-# nothing in it changes our behaviour.
+# 2026-08-24). Bumped 2026-09-10 **v2026.09.02 → v2026.09.10.1** for
+# forge-media #154, which this project asked for (siphon-ai #603):
+# `MediaSession::set_hep_correlation_id`, so the RTCP / RTP-QoS HEP chunks
+# forge ships carry the SIP Call-ID instead of our bridge id and thread
+# onto Homer's call view. forge-engine 0.5.1 → 0.6.0.
+#
+# The range is otherwise FCP video-conferencing work. Per-crate, for what
+# we build:
+#
+#  * **forge-mixer 0.2.0 → 0.4.0**: `MixerOptions` gains `frame_clock` —
+#    set `false` in `media-glue/src/room.rs`, the drain-on-read behaviour
+#    the room loop always had; `ParticipantMetadata` gains `energy`, which
+#    we never construct.
+#  * **forge-rtp 0.3.1 → 0.6.0**: RTCP feedback packet types and variants
+#    (nothing here matches `RtcpPacket` exhaustively), video payload and
+#    per-SSRC SRTP support, and a fix to `RtcpPacket::ReceiverReport`
+#    serializing its length field one 32-bit word short. That one does not
+#    reach our wire: forge-engine forwards the peer's RTCP bytes and only
+#    *parses* RRs, it never builds one through that serializer.
+#  * **forge-webrtc 0.5.0 → 0.6.0**: a video section. The broken signatures
+#    (`TransportEvent::Rtcp`, `sdp::build_answer`, `Transport::new`) are
+#    ones webrtc-glue does not call.
+#  * **forge-sdp 0.2.0 → 0.2.1**: `sip-sdp` → siphon-rs v2026.09.05 (see the
+#    siphon-rs bump above — moved together so the lock keeps one copy).
+#  * forge-core 0.2.0 → 0.2.2: video media types, additive.
+#
+# Prior bump, 2026-09-02 **v2026.08.26 → v2026.09.02**, a routine roll-up:
+# nothing in it was asked for by this project, and nothing in it changed
+# our behaviour.
 #
 # Three tags passed (v2026.09.01 was superseded untagged by v2026.09.01.1).
 # Per-crate audit over the whole range — only three files we build changed:
@@ -546,25 +578,25 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
 # WebRTC leg (DEV_PLAN_WebRTC.md Phase 2). Only reachable through
 # siphon-ai-webrtc-glue, which the daemon pulls in behind its
 # `webrtc` feature — a default build links neither.
-forge-webrtc  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-ice     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-webrtc  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-ice     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.10.1" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.
