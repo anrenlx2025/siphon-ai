@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.1] - 2026-09-11
+
 ### Fixed
 
 - **Calls now ship the HEP lifecycle Log chunks HEP.md has always described**
