@@ -1661,6 +1661,49 @@ any = true
     assert!(cfg.routes.has_default());
 }
 
+/// `[hep].node_status_interval_secs` (0.52.0): default 60 s, `0` turns
+/// the node-health heartbeat off, and anything under the 5 s floor fails
+/// the load rather than being silently raised.
+#[test]
+fn hep_node_status_interval_defaults_disables_and_has_a_floor() {
+    let env = MapEnv::new([]);
+    let toml = |extra: &str| {
+        format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[hep]
+enabled = true
+collector = "127.0.0.1:9060"
+capture_id = 2001
+{extra}
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#
+        )
+    };
+    let secs = |s: u64| Some(std::time::Duration::from_secs(s));
+
+    let cfg = load_from_str_with_env(&toml(""), &env).unwrap();
+    assert_eq!(cfg.hep.node_status_interval, secs(60));
+    let cfg = load_from_str_with_env(&toml("node_status_interval_secs = 0"), &env).unwrap();
+    assert_eq!(cfg.hep.node_status_interval, None);
+    let cfg = load_from_str_with_env(&toml("node_status_interval_secs = 300"), &env).unwrap();
+    assert_eq!(cfg.hep.node_status_interval, secs(300));
+    let err = load_from_str_with_env(&toml("node_status_interval_secs = 3"), &env).unwrap_err();
+    assert!(
+        err.to_string().contains("node_status_interval_secs"),
+        "got: {err}"
+    );
+}
+
 #[test]
 fn unknown_field_in_known_section_errors() {
     // We're strict on typos within known sections — `auido` should

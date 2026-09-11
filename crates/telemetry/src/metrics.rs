@@ -219,6 +219,14 @@ pub const OTLP_COLLECTOR_UP: &str = "siphon_ai_otlp_collector_up";
 /// with ICMP this is reliable and flips within one interval.
 pub const HEP_COLLECTOR_UP: &str = "siphon_ai_hep_collector_up";
 
+/// Node-health HEP `Log` chunks handed to the sink (`[hep]` with a
+/// collector), labeled by `event`: `node_started`, `node_ready`,
+/// `node_not_ready`, `node_draining`, `node_status`, `node_stopping`.
+/// Counts emission, not delivery — what reaches the collector is
+/// [`HEP_PACKETS_SENT_TOTAL`] / [`HEP_PACKETS_DROPPED_TOTAL`].
+/// `node_status` rises once per `[hep].node_status_interval_secs`.
+pub const HEP_NODE_EVENTS_TOTAL: &str = "siphon_ai_hep_node_events_total";
+
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
 /// `registered` / `auth_failed` / `transport_error` / `timeout` /
@@ -1027,6 +1035,10 @@ pub fn register_descriptions() {
         "1 if no HEP UDP send failed in the last sample interval, 0 otherwise (ICMP-unreachable collector)."
     );
     describe_counter!(
+        HEP_NODE_EVENTS_TOTAL,
+        "Node-health HEP Log chunks queued, by event (node_started, node_ready, node_not_ready, node_draining, node_status, node_stopping)."
+    );
+    describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
         "REGISTER attempts by [[register]].name and outcome."
     );
@@ -1469,6 +1481,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     SIP_RATE_LIMITED_TOTAL,
     HEP_PACKETS_SENT_TOTAL,
     HEP_PACKETS_DROPPED_TOTAL,
+    HEP_NODE_EVENTS_TOTAL,
     OTLP_LOG_RECORDS_DROPPED_TOTAL,
     OTLP_SPANS_DROPPED_TOTAL,
     REGISTER_ATTEMPTS_TOTAL,

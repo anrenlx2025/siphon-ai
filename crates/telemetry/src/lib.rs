@@ -42,7 +42,8 @@ pub use admin::{
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{
-    CallLifecycle, HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, SinkHandle,
+    node_correlation_id, CallLifecycle, HepBuildError, HepTelemetry, HepTelemetryBuild,
+    HepWorkerHandle, NodeEvent, NodeHealthReporter, SinkHandle,
 };
 pub use http::{AdminServer, AdminTlsConfigFn, ObservabilityServer};
 pub use log_filter::{has_global_level, with_floor, LogFilterError, LogFilterHandle, LOG_FLOOR};

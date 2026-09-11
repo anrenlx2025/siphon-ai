@@ -1363,7 +1363,16 @@ collector        = "homer.example.com:9060"   # UDP only in v1
 capture_id       = 2001
 capture_password = "${HEP_PASSWORD}"
 queue_capacity   = 256                        # default
+node_status_interval_secs = 60                # default; 0 = heartbeat off (0.52.0)
 ```
+
+`node_status_interval_secs` (0.52.0) sets how often each node sends Homer a
+`node_status` heartbeat: its version, readiness, drain state, active calls,
+registrations and uptime, as a `Log` chunk keyed by `node:<[node].id>`.
+Default `60`; `0` turns the heartbeat off, and values below `5` fail the
+load. The transition chunks (`node_started`, `node_ready`,
+`node_draining`, `node_stopping`) ship whenever HEP has a collector. See
+`docs/HEP.md` → *Node health Log chunks*.
 
 When `enabled = true`, `collector` and `capture_id` are required. HEP
 emission is best-effort: a full queue drops the packet and ticks

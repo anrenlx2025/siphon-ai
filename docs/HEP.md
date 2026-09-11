@@ -25,6 +25,8 @@ one queue and one UDP socket through the daemon-wide `HepSink`:
    ┌──────────────┐
    │ siphon-ai    │ ──► call_started / call_ended text line per call
    │ (telemetry)  │     HepProtocol::Log (chunk type 0x64)
+   │              │ ──► node_* health lines (start, ready, draining,
+   │              │     heartbeat, stop) — HepProtocol::Log, per node
    │              │ ──► Full CDR JSON when a call ends
    │              │     HepProtocol::Cdr (chunk type 0x65)
    │              │ ──► STIR/SHAKEN verdict JSON per inbound call
@@ -178,6 +180,43 @@ outbound attempts that never connect ship no Log chunks — their SIP
 ladder already says what happened. Through 0.51.0 no lifecycle chunk was
 emitted at all; the only type-100 packet a node sent was the
 `POST /admin/v1/hep/test` probe (#604).
+
+## Node health Log chunks (0x64)
+
+With `[hep]` shipping to a collector, each node also sends its own health
+as `HepProtocol::Log` chunks (0.52.0). They are correlated by
+`node:<[node].id>` rather than a Call-ID: search Homer for that
+correlation id to see one node's timeline. The `node:` prefix keeps it from
+ever colliding with a SIP Call-ID.
+
+```text
+node_started node=node-a version=0.52.0 ready=false draining=false active_calls=0 registrations=0/1 uptime_secs=0
+node_ready node=node-a version=0.52.0 ready=true draining=false active_calls=0 registrations=1/1 uptime_secs=1
+node_status node=node-a version=0.52.0 ready=true draining=false active_calls=12 registrations=1/1 uptime_secs=3601
+node_draining node=node-a version=0.52.0 ready=false draining=true active_calls=9 registrations=1/1 uptime_secs=86400
+node_stopping node=node-a version=0.52.0 ready=false draining=true active_calls=0 registrations=1/1 uptime_secs=86431
+```
+
+| Event | When |
+|---|---|
+| `node_started` | Once at boot, when reporting starts — just before `/ready` flips. |
+| `node_ready` | `/ready` went 503 → 200. |
+| `node_not_ready` | `/ready` went 200 → 503 *without* a drain. Nothing does that today; if something starts to, it shows up here rather than being hidden. |
+| `node_draining` | A graceful drain began (SIGTERM or `POST /admin/v1/drain`). A drain also turns `/ready` off, but reads as this one event, not two. |
+| `node_status` | Every `[hep].node_status_interval_secs` (default 60; `0` turns only the heartbeat off). |
+| `node_stopping` | Teardown, queued before the HEP worker drains so it reaches the collector. |
+
+The fields are the `GET /admin/v1/status` snapshot plus `ready`, read from
+the same closure and the same flag `/ready` answers from, so Homer, the
+admin API and a load balancer's probe cannot disagree. Changes are checked
+once a second; a drain shorter than that is still reported, by one last
+check at teardown. `siphon_ai_hep_node_events_total{event}` counts the
+chunks handed to the sink (delivery is still `siphon_ai_hep_packets_*`).
+
+What this cannot tell you: a node that dies without a clean shutdown
+(`kill -9`, OOM, host loss) sends no `node_stopping`. In Homer the tell is
+the heartbeat going quiet; page on Prometheus `up == 0` for the node,
+which catches the same thing without depending on HEP.
 
 ## STIR/SHAKEN verstat chunk (0x66)
 
