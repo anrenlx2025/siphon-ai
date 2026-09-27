@@ -108,8 +108,12 @@ const BARGE_IN_PLAYOUT_GRACE: Duration = Duration::from_millis(60);
 /// boundary — FreeSWITCH already tolerates gaps this size today), and
 /// a comfort-noise frame landing inside the bot's sentence is an
 /// audible blip plus a 20 ms shift once the late server frame joins
-/// behind it. Any server frame reaching the outbound queue restarts
-/// the clock.
+/// behind it. The clock measures from the idle verdict first holding
+/// and restarts only on a server frame reaching the outbound queue —
+/// other-owner windows (hold/MOH, arbitration re-pushes) don't reset
+/// it, so the first idle tick after they release can engage at once,
+/// which is the wanted behaviour there (the RTP gap already spans
+/// the window).
 const IDLE_KEEPALIVE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// PROTOCOL.md §5.5: outbound audio the tap holds ahead of the forge
@@ -2728,16 +2732,15 @@ impl MediaTap {
                 // these are exactly the states where the caller's
                 // speech must keep arriving — dropping outbound RTP
                 // there re-silences the FreeSWITCH leg (#610 review).
-                // Engagement is debounced: the arm waits
-                // IDLE_KEEPALIVE_DEBOUNCE of continuous idleness (each
-                // server frame reaching the queue restarts it) so an
+                // Engagement is debounced (IDLE_KEEPALIVE_DEBOUNCE —
+                // the clock restarts only on a server frame reaching
+                // the queue, full semantics at the constant) so an
                 // 80–220 ms mid-utterance stall — GC pause, TTS chunk
                 // boundary — reads as jitter, not as the server going
-                // silent. The #417 peer-hold gate is checked in the
-                // body (see there for why not the guard) and books
-                // nothing into the suppressed-frames metric — that
-                // counter is reserved for audio the caller actually
-                // missed.
+                // silent. The #417 peer-hold gate is checked in the body (see
+                // there for why not the guard) and books nothing into
+                // the suppressed-frames metric — that counter is
+                // reserved for audio the caller actually missed.
                 _ = keepalive_tick.tick(),
                     if self.idle_keepalive != IdleKeepaliveMode::Off
                         && outbound.is_empty()
@@ -2771,19 +2774,23 @@ impl MediaTap {
                     // synthetic fill frame isn't that (a held idle call
                     // would climb it 3000/min of fill, and the
                     // release-edge log would report it as dropped
-                    // audio). The tx_gate_active() call still runs so
-                    // the engage/release edge logs fire with counts
-                    // that reflect only real audio. The tick stays
-                    // consumed, on purpose: the gate's atomic flip has
-                    // no waker of its own, and with the check in the
-                    // arm *guard* a ready tick whose precondition reads
-                    // false gets its output dropped — the loop then
-                    // parks with nothing to wake it on release, which
-                    // on exactly the FreeSWITCH-style silent-peer paths
-                    // #610 describes (no inbound RTP → no recv_frame
-                    // wakeups) means keepalive never resumes. The
-                    // consumed tick is the 20 ms heartbeat that
-                    // re-reads the flag.
+                    // audio). The tx_gate_active() call still runs on
+                    // every post-debounce tick, so the engage/release
+                    // edge logs fire with counts that reflect only real
+                    // audio (an edge flipping *during* the debounce
+                    // window is only observed up to 250 ms late). The
+                    // tick stays consumed, on purpose: the gate's
+                    // atomic flip has no waker of its own, and with the
+                    // check in the arm *guard* a ready tick whose
+                    // precondition reads false gets its output dropped —
+                    // the loop then parks until an unrelated arm wakes
+                    // it. On exactly the FreeSWITCH-style silent-peer
+                    // paths #610 describes (no inbound RTP → no
+                    // recv_frame wakeups) that means a keepalive gap of
+                    // the default rtp-stats tick (5 s), and with
+                    // periodic arms disabled (`rtp_stats_interval_ms =
+                    // 0`) no resume at all. The consumed tick is the
+                    // 20 ms heartbeat that re-reads the flag.
                     if self.tx_gate_active() {
                         continue;
                     }
