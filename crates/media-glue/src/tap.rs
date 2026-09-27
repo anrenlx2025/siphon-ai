@@ -759,15 +759,17 @@ pub struct MediaTap {
     /// acceptor from `[bridge].ws_reconnect_enabled` via
     /// [`Self::with_survive_ws_drop`].
     survive_ws_drop: bool,
-    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, upstream
-    /// issue #610). When not [`IdleKeepaliveMode::Off`], the run loop
-    /// emits one frame toward the caller per 20 ms tick whenever forge
-    /// has nothing in playout (`!bot_is_playing(clock.until)` with an
+    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, #610).
+    /// When not [`IdleKeepaliveMode::Off`], the run loop emits one
+    /// frame toward the caller per 20 ms tick whenever forge has
+    /// nothing in playout (`!bot_is_playing(clock.until)` with an
     /// empty outbound queue and no armed marks) and no other feature
-    /// owns the caller's ear (park/hold/announcement, pending barge-in
-    /// arbitration, mute, room membership, a dropped WS, the #417 tx
-    /// gate). Default `Off`; installed by the acceptor via
-    /// [`Self::with_idle_keepalive`].
+    /// owns the caller's ear (park/hold/announcement, room
+    /// membership, a dropped WS, the #417 tx gate). Mute and a
+    /// pending barge-in arbitration deliberately do NOT suppress it —
+    /// they gate bot→caller audio only, while caller→server keeps
+    /// flowing and still needs our outbound RTP. Default `Off`;
+    /// installed by the acceptor via [`Self::with_idle_keepalive`].
     idle_keepalive: IdleKeepaliveMode,
 }
 
@@ -2683,10 +2685,15 @@ impl MediaTap {
                 // (the pace tick's own guard: a mark must never fire
                 // ahead of the audio it rides). With the feature off
                 // (the default) the arm is never selectable and the
-                // idle call pays nothing. The remaining suppression set
-                // tracks the pace tick's `feed_ok` conditions — park,
-                // hold, announcement, pending arbitration, mute, a
-                // dropped WS, room membership.
+                // idle call pays nothing. The suppression set is the
+                // *owner* subset of the pace tick's `feed_ok`
+                // conditions — park, hold, announcement, a dropped WS,
+                // room membership — deliberately NOT mute or a pending
+                // barge-in arbitration: those only gate *server* audio
+                // (bot→caller), while caller→server keeps flowing, and
+                // these are exactly the states where the caller's
+                // speech must keep arriving — dropping outbound RTP
+                // there re-silences the FreeSWITCH leg (#610 review).
                 _ = keepalive_tick.tick(),
                     if self.idle_keepalive != IdleKeepaliveMode::Off
                         && outbound.is_empty()
@@ -2695,8 +2702,6 @@ impl MediaTap {
                         && parked.is_none()
                         && held.is_none()
                         && announcing.is_none()
-                        && pending_verdict.is_none()
-                        && !self.muted
                         && !ws_dropped
                         && room_send.is_none() =>
                 {
@@ -4191,4 +4196,53 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+
+    /// #610: `mute` only drops bot→caller playout (the playout arm's
+    /// `if self.muted { continue; }`) — caller→server audio keeps
+    /// flowing, and the caller's media path still needs outbound RTP
+    /// from us or the peer goes silent in both directions. A muted
+    /// call with the server streaming (frames drained-and-dropped by
+    /// the mute arm) must therefore keep emitting keepalive frames.
+    #[tokio::test]
+    async fn idle_keepalive_emits_while_muted() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-muted");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::ComfortNoise);
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        cmd_tx.send(TapCommand::Mute).await.expect("send mute");
+        // Give the mute handler a moment to land, then require a
+        // steady drip of keepalive frames reaching forge.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut frames = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline && frames < 5 {
+            if manager
+                .try_recv_outbound_request(&call_id)
+                .await
+                .is_some()
+            {
+                frames += 1;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert!(
+            frames >= 5,
+            "keepalive must keep emitting while muted (got {frames} frames in 2 s)"
+        );
+    }
+
 }
