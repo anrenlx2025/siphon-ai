@@ -73,14 +73,10 @@ use siphon_ai_telemetry::metrics::{
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
-// `AudioSource` is the trait behind `ToneGenerator::read_frame` — the
-// idle-keepalive comfort-noise arm reads through it (#610), exactly
-// as `moh.rs` does.
 use forge_engine::{
     MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest, OutboundMediaFrame,
     PlayoutMode,
 };
-use forge_injection::AudioSource;
 use siphon_ai_bridge::{
     pack_pcm16_le, unpack_pcm16_le, AudioError, BargeInOutcome, ConferenceLeftReason, DtmfMethod,
     OutgoingEvent, Reframer,
@@ -618,6 +614,24 @@ pub enum IdleKeepaliveMode {
     /// `ToneGenerator::comfort_noise`, the same primitive MOH falls
     /// back to (`crate::moh`).
     ComfortNoise,
+}
+
+impl std::str::FromStr for IdleKeepaliveMode {
+    type Err = String;
+
+    /// The single token set behind `[bridge].idle_keepalive` and its
+    /// `[route.bridge]` override: `"off"`, `"silence"`,
+    /// `"comfort_noise"`. Any other spelling errors with the
+    /// offending token — the config loader fails loud with it, and
+    /// the acceptor's per-route fallback warns with it.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "silence" => Ok(Self::Silence),
+            "comfort_noise" => Ok(Self::ComfortNoise),
+            other => Err(other.to_string()),
+        }
+    }
 }
 
 /// Why the tap pump exited cleanly.
@@ -1438,11 +1452,13 @@ impl MediaTap {
         // Frame length: `sample_rate / 50` — the exact 20 ms sample
         // count (bridge rates are 8/16 kHz; both divide evenly).
         let keepalive_frame_samples = self.sample_rate as usize / 50;
-        // The comfort-noise generator is built only for the
+        // The comfort-noise source is built only for the
         // `comfort_noise` mode; `silence` synthesizes zero frames
-        // directly and allocates nothing up front.
-        let mut keepalive_tone = (self.idle_keepalive == IdleKeepaliveMode::ComfortNoise)
-            .then(|| forge_injection::ToneGenerator::comfort_noise(self.sample_rate));
+        // directly and allocates nothing up front. `MohSource` with
+        // no file IS comfort-noise-with-silence-fallback at 20 ms
+        // framing — one copy of that logic, shared with hold MOH.
+        let mut keepalive_source = (self.idle_keepalive == IdleKeepaliveMode::ComfortNoise)
+            .then(|| crate::moh::MohSource::new(None, self.sample_rate));
         let mut keepalive_engaged = false;
         // When the idle verdict (empty queue + marks, nothing in
         // playout, no other owner) first held; `None` until then. A
@@ -2780,25 +2796,32 @@ impl MediaTap {
                         );
                     }
                     let samples = match self.idle_keepalive {
-                        // Never panics: a missing generator or a
-                        // failed read degrades to a silence frame —
-                        // the same stance `MohSource` takes.
-                        IdleKeepaliveMode::ComfortNoise => keepalive_tone
+                        // `next_frame` never errors and never panics —
+                        // comfort noise with a silence fallback is
+                        // MohSource's whole contract.
+                        IdleKeepaliveMode::ComfortNoise => keepalive_source
                             .as_mut()
-                            .and_then(|t| t.read_frame(keepalive_frame_samples).ok())
+                            .map(|s| s.next_frame())
                             .unwrap_or_else(|| vec![0i16; keepalive_frame_samples]),
                         // `silence` (and the impossible `Off` — the
                         // arm guard excludes it) emit digital silence.
                         _ => vec![0i16; keepalive_frame_samples],
                     };
                     // The recording's Bot channel is "what the caller
-                    // hears" — keepalive frames are caller-audible, so
-                    // they fork exactly like the MOH arm's frames do.
-                    if let Some((rec, drops)) = &self.recording {
-                        if let Err(mpsc::error::TrySendError::Full(_)) =
-                            rec.try_send(RecFrame::Bot(pack_pcm16_le(&samples)))
-                        {
-                            drops.fetch_add(1, Ordering::Relaxed);
+                    // hears" — a comfort-noise keepalive frame is
+                    // caller-audible, so it forks exactly like the MOH
+                    // arm's frames do. In `silence` mode the fork is
+                    // skipped: the recorder pads a missing Bot frame
+                    // with zeros on its own 20 ms tick, and pushing
+                    // zeros would be ~50 allocs/s competing for
+                    // recorder channel capacity for nothing.
+                    if self.idle_keepalive == IdleKeepaliveMode::ComfortNoise {
+                        if let Some((rec, drops)) = &self.recording {
+                            if let Err(mpsc::error::TrySendError::Full(_)) =
+                                rec.try_send(RecFrame::Bot(pack_pcm16_le(&samples)))
+                            {
+                                drops.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     let frame = OutboundMediaFrame {
@@ -4288,11 +4311,7 @@ mod tests {
         let mut frames = 0usize;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline && frames < 5 {
-            if manager
-                .try_recv_outbound_request(&call_id)
-                .await
-                .is_some()
-            {
+            if manager.try_recv_outbound_request(&call_id).await.is_some() {
                 frames += 1;
             } else {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4405,7 +4424,10 @@ mod tests {
             "streamed frames must reach forge exactly once each (got {pattern_frames}/60)"
         );
         let first = frames.iter().position(|p| *p).expect("a pattern frame");
-        let last = frames.iter().rposition(|p| *p).expect("pattern frames exist");
+        let last = frames
+            .iter()
+            .rposition(|p| *p)
+            .expect("pattern frames exist");
         let leaked = frames[first..=last].iter().filter(|p| !**p).count();
         assert_eq!(
             leaked, 0,
@@ -4467,5 +4489,19 @@ mod tests {
             matches!(got, forge_engine::OutboundMediaRequest::Audio(_)),
             "expected an audio request, got {got:?}"
         );
+    }
+
+    /// The `[bridge].idle_keepalive` token set lives in exactly one
+    /// place (`FromStr`); the loader, the route validator and the
+    /// acceptor fallback all parse through it.
+    #[test]
+    fn idle_keepalive_mode_from_str() {
+        use IdleKeepaliveMode::{ComfortNoise, Off, Silence};
+        assert_eq!("off".parse(), Ok(Off));
+        assert_eq!("silence".parse(), Ok(Silence));
+        assert_eq!("comfort_noise".parse(), Ok(ComfortNoise));
+        for bad in ["", "OFF", "comfortnoise", "cn", "none"] {
+            assert_eq!(bad.parse::<IdleKeepaliveMode>(), Err(bad.to_string()));
+        }
     }
 }

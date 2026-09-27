@@ -1002,17 +1002,14 @@ pub fn resolve_idle_keepalive(
 ) -> siphon_ai_media_glue::IdleKeepaliveMode {
     match route.bridge.idle_keepalive.as_deref() {
         None => defaults.idle_keepalive,
-        Some("off") => siphon_ai_media_glue::IdleKeepaliveMode::Off,
-        Some("silence") => siphon_ai_media_glue::IdleKeepaliveMode::Silence,
-        Some("comfort_noise") => siphon_ai_media_glue::IdleKeepaliveMode::ComfortNoise,
-        Some(other) => {
+        Some(s) => s.parse().unwrap_or_else(|token| {
             tracing::warn!(
                 route = %route.name,
-                value = %other,
+                value = %token,
                 "[route.bridge].idle_keepalive has an invalid value; falling back to the daemon default"
             );
             defaults.idle_keepalive
-        }
+        }),
     }
 }
 

@@ -3003,10 +3003,8 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
     // tokens fail loud here rather than silently inheriting on the
     // first call (CLAUDE.md §4.6).
     let idle_keepalive = match raw.idle_keepalive.as_deref() {
-        None | Some("off") => siphon_ai_media_glue::IdleKeepaliveMode::Off,
-        Some("silence") => siphon_ai_media_glue::IdleKeepaliveMode::Silence,
-        Some("comfort_noise") => siphon_ai_media_glue::IdleKeepaliveMode::ComfortNoise,
-        Some(other) => return Err(CompileError::UnknownIdleKeepalive(other.to_string())),
+        None => siphon_ai_media_glue::IdleKeepaliveMode::Off,
+        Some(s) => s.parse().map_err(CompileError::UnknownIdleKeepalive)?,
     };
 
     // `None` → 60 s default; `Some(0)` → watchdog off. The merge
@@ -3269,10 +3267,10 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
         // typo would load fine and silently inherit the global at
         // resolve time instead of failing loud (§4.6).
         if let Some(value) = route.bridge.idle_keepalive.as_deref() {
-            if !matches!(value, "off" | "silence" | "comfort_noise") {
+            if let Err(token) = value.parse::<siphon_ai_media_glue::IdleKeepaliveMode>() {
                 return Err(CompileError::UnknownRouteIdleKeepalive {
                     route: route.name.clone(),
-                    value: value.to_string(),
+                    value: token,
                 });
             }
         }
