@@ -106,6 +106,16 @@ const PLAYOUT_FRAME_MS: u64 = 20;
 /// gate.
 const BARGE_IN_PLAYOUT_GRACE: Duration = Duration::from_millis(60);
 
+/// #610 idle-keepalive debounce: the arm only engages once the call
+/// has been continuously idle for this long. A mid-utterance server
+/// stall of a few hundred ms is routine jitter (GC pause, TTS chunk
+/// boundary — FreeSWITCH already tolerates gaps this size today), and
+/// a comfort-noise frame landing inside the bot's sentence is an
+/// audible blip plus a 20 ms shift once the late server frame joins
+/// behind it. Any server frame reaching the outbound queue restarts
+/// the clock.
+const IDLE_KEEPALIVE_DEBOUNCE: Duration = Duration::from_millis(250);
+
 /// PROTOCOL.md §5.5: outbound audio the tap holds ahead of the forge
 /// feed — 10 frames = 200 ms. Beyond this the **oldest** held frame is
 /// evicted (`siphon_ai_outbound_audio_frames_dropped_total`), so a
@@ -1436,6 +1446,11 @@ impl MediaTap {
         let mut keepalive_tone = (self.idle_keepalive == IdleKeepaliveMode::ComfortNoise)
             .then(|| forge_injection::ToneGenerator::comfort_noise(self.sample_rate));
         let mut keepalive_engaged = false;
+        // When the idle verdict (empty queue + marks, nothing in
+        // playout, no other owner) first held; `None` until then. A
+        // server frame reaching the outbound queue clears it back to
+        // `None`, restarting the debounce after every server arrival.
+        let mut keepalive_idle_since: Option<Instant> = None;
 
         // Barge-in debounce (echo/noise gate, §barge_in_debounce). Pinned
         // far-future placeholder; reset to `now + debounce` when a barge-in
@@ -1649,6 +1664,11 @@ impl MediaTap {
                     // recording fork happens at the forge push (inside
                     // the drain), so an evicted frame — audio the
                     // caller never heard — is never recorded either.
+                    // Server audio reached the queue — the keepalive's
+                    // debounce clock restarts (a following stall must
+                    // outlast IDLE_KEEPALIVE_DEBOUNCE from *this*
+                    // arrival before any fill frame is considered).
+                    keepalive_idle_since = None;
                     outbound.push_audio(bytes, &self.call_id);
                     self.drain_outbound(
                         &mut outbound,
@@ -2694,6 +2714,12 @@ impl MediaTap {
                 // these are exactly the states where the caller's
                 // speech must keep arriving — dropping outbound RTP
                 // there re-silences the FreeSWITCH leg (#610 review).
+                // Engagement is debounced: the arm waits
+                // IDLE_KEEPALIVE_DEBOUNCE of continuous idleness (each
+                // server frame reaching the queue restarts it) so an
+                // 80–220 ms mid-utterance stall — GC pause, TTS chunk
+                // boundary — reads as jitter, not as the server going
+                // silent.
                 _ = keepalive_tick.tick(),
                     if self.idle_keepalive != IdleKeepaliveMode::Off
                         && outbound.is_empty()
@@ -2710,6 +2736,21 @@ impl MediaTap {
                     // and skipped like the others.
                     if self.tx_gate_active() {
                         self.note_tx_suppressed();
+                        continue;
+                    }
+                    // Debounce: only engage after the idle verdict has
+                    // held continuously for IDLE_KEEPALIVE_DEBOUNCE —
+                    // a short mid-stream stall must not read as the
+                    // server going silent.
+                    let now = Instant::now();
+                    let idle_since = match keepalive_idle_since {
+                        Some(t) => t,
+                        None => {
+                            keepalive_idle_since = Some(now);
+                            continue;
+                        }
+                    };
+                    if now.duration_since(idle_since) < IDLE_KEEPALIVE_DEBOUNCE {
                         continue;
                     }
                     if !keepalive_engaged {
@@ -4242,6 +4283,116 @@ mod tests {
         assert!(
             frames >= 5,
             "keepalive must keep emitting while muted (got {frames} frames in 2 s)"
+        );
+    }
+
+    /// #610 debounce: a brief mid-stream server stall — the size a
+    /// GC pause or TTS chunk boundary produces — must NOT trigger a
+    /// fill frame. A comfort-noise frame landing inside the bot's
+    /// sentence is an audible blip, and the late server frame joins
+    /// behind it, shifting the playout by 20 ms. The stall here is
+    /// 220 ms: with `FORGE_LEAD_FRAMES` = 5 the playout clock sits
+    /// ~100 ms ahead during steady streaming, so the arm reads "idle"
+    /// at roughly stall_start + 160 ms — 220 ms sits safely in the
+    /// "fires today, must not fire" window while staying under the
+    /// 250 ms debounce.
+    #[tokio::test]
+    async fn idle_keepalive_debounces_brief_mid_stream_stall() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-stall");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::ComfortNoise);
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (playout_tx, playout_rx) = mpsc::channel(32);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        const PATTERN: i16 = 0x55AA;
+        let server_frame = {
+            let mut b = Vec::with_capacity(320);
+            for _ in 0..160 {
+                b.extend_from_slice(&PATTERN.to_le_bytes());
+            }
+            b
+        };
+
+        // 50 fps, one deliberate 220 ms gap in the middle (after the
+        // 20th frame). Everything else about the stream is jitter-free.
+        let streamer = {
+            let server_frame = server_frame.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // the immediate first tick
+                for i in 0..60 {
+                    playout_tx.send(server_frame.clone()).await.expect("stream");
+                    tick.tick().await;
+                    if i == 19 {
+                        tokio::time::sleep(Duration::from_millis(220)).await;
+                    }
+                }
+            })
+        };
+
+        // Collect forge-bound frames until the streamer finishes plus
+        // a 300 ms tail for the last frames to drain through.
+        let mut frames: Vec<bool> = Vec::new(); // true = pattern frame
+        let mut pattern_frames = 0usize;
+        // Collect forge-bound frames concurrently with the stream (the
+        // manager's request channel is bounded — draining it live is
+        // what keeps the tap's pushes flowing), then a short tail for
+        // the last frames to drain through once the streamer exits.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match manager.try_recv_outbound_request(&call_id).await {
+                Some(forge_engine::OutboundMediaRequest::Audio(f)) => {
+                    let pattern = f.samples.len() == 160 && f.samples.iter().all(|&s| s == PATTERN);
+                    if pattern {
+                        pattern_frames += 1;
+                    }
+                    frames.push(pattern);
+                }
+                _ => tokio::time::sleep(Duration::from_millis(2)).await,
+            }
+            if pattern_frames >= 60 && streamer.is_finished() {
+                break;
+            }
+        }
+        streamer.await.expect("streamer join");
+        // Give any straggler frames a moment before judging leaks.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while tokio::time::Instant::now() < drain_deadline {
+            match manager.try_recv_outbound_request(&call_id).await {
+                Some(forge_engine::OutboundMediaRequest::Audio(f)) => {
+                    let pattern = f.samples.len() == 160 && f.samples.iter().all(|&s| s == PATTERN);
+                    if pattern {
+                        pattern_frames += 1;
+                    }
+                    frames.push(pattern);
+                }
+                _ => tokio::time::sleep(Duration::from_millis(2)).await,
+            }
+        }
+
+        assert!(
+            (55..=60).contains(&pattern_frames),
+            "streamed frames must reach forge exactly once each (got {pattern_frames}/60)"
+        );
+        let first = frames.iter().position(|p| *p).expect("a pattern frame");
+        let last = frames.iter().rposition(|p| *p).expect("pattern frames exist");
+        let leaked = frames[first..=last].iter().filter(|p| !**p).count();
+        assert_eq!(
+            leaked, 0,
+            "a 220 ms mid-stream stall is ordinary jitter; keepalive must not fill it \
+             ({leaked} non-pattern frame(s) between the first and last streamed frame)"
         );
     }
 
