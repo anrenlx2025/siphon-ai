@@ -2719,7 +2719,11 @@ impl MediaTap {
                 // server frame reaching the queue restarts it) so an
                 // 80–220 ms mid-utterance stall — GC pause, TTS chunk
                 // boundary — reads as jitter, not as the server going
-                // silent.
+                // silent. The #417 peer-hold gate is checked in the
+                // body (see there for why not the guard) and books
+                // nothing into the suppressed-frames metric — that
+                // counter is reserved for audio the caller actually
+                // missed.
                 _ = keepalive_tick.tick(),
                     if self.idle_keepalive != IdleKeepaliveMode::Off
                         && outbound.is_empty()
@@ -2731,13 +2735,6 @@ impl MediaTap {
                         && !ws_dropped
                         && room_send.is_none() =>
                 {
-                    // #417: a peer hold with our send negotiated away
-                    // suppresses every caller-leg push site — counted
-                    // and skipped like the others.
-                    if self.tx_gate_active() {
-                        self.note_tx_suppressed();
-                        continue;
-                    }
                     // Debounce: only engage after the idle verdict has
                     // held continuously for IDLE_KEEPALIVE_DEBOUNCE —
                     // a short mid-stream stall must not read as the
@@ -2751,6 +2748,29 @@ impl MediaTap {
                         }
                     };
                     if now.duration_since(idle_since) < IDLE_KEEPALIVE_DEBOUNCE {
+                        continue;
+                    }
+                    // #417: a peer hold with our send negotiated away
+                    // forbids these frames like every other push site —
+                    // but deliberately NOT via note_tx_suppressed: that
+                    // counter means "audio the caller missed", and a
+                    // synthetic fill frame isn't that (a held idle call
+                    // would climb it 3000/min of fill, and the
+                    // release-edge log would report it as dropped
+                    // audio). The tx_gate_active() call still runs so
+                    // the engage/release edge logs fire with counts
+                    // that reflect only real audio. The tick stays
+                    // consumed, on purpose: the gate's atomic flip has
+                    // no waker of its own, and with the check in the
+                    // arm *guard* a ready tick whose precondition reads
+                    // false gets its output dropped — the loop then
+                    // parks with nothing to wake it on release, which
+                    // on exactly the FreeSWITCH-style silent-peer paths
+                    // #610 describes (no inbound RTP → no recv_frame
+                    // wakeups) means keepalive never resumes. The
+                    // consumed tick is the 20 ms heartbeat that
+                    // re-reads the flag.
+                    if self.tx_gate_active() {
                         continue;
                     }
                     if !keepalive_engaged {
@@ -4396,4 +4416,58 @@ mod tests {
         );
     }
 
+    /// #610 × #417: under a peer hold (recvonly re-INVITE) the
+    /// keepalive must not emit, and its synthetic ticks must not be
+    /// accounted as suppressed caller audio —
+    /// siphon_ai_peer_hold_tx_suppressed_frames_total means "audio
+    /// the caller missed", and a fill frame isn't that. The consumed
+    /// tick doubles as the 20 ms heartbeat that notices the release:
+    /// with nothing else flowing on a silent held call, it is the
+    /// only wakeup the loop gets.
+    #[tokio::test]
+    async fn idle_keepalive_gated_under_peer_hold_resumes_after_release() {
+        let suppressed = ::std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-gate");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::ComfortNoise)
+        .with_tx_suppressed(::std::sync::Arc::clone(&suppressed));
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        // Gated for well past the debounce: nothing may reach forge.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            manager.try_recv_outbound_request(&call_id).await.is_none(),
+            "keepalive must not emit while the peer-hold tx gate is up"
+        );
+
+        // Release: the debounce already elapsed under the gate, so
+        // frames resume within a couple of ticks.
+        suppressed.store(false, Ordering::Release);
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(req) = manager.try_recv_outbound_request(&call_id).await {
+                    return req;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("keepalive resumes after the gate releases");
+        assert!(
+            matches!(got, forge_engine::OutboundMediaRequest::Audio(_)),
+            "expected an audio request, got {got:?}"
+        );
+    }
 }
