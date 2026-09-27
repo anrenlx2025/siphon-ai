@@ -140,8 +140,8 @@ pub struct BridgeOverride {
     /// shape: `None` = inherit, `Some(0)` = disable, `Some(n)` = ms.
     pub rtp_stats_interval_ms: Option<u64>,
 
-    /// Per-route override of `[bridge].idle_keepalive` (upstream
-    /// issue #610): `"off"` | `"silence"` | `"comfort_noise"`.
+    /// Per-route override of `[bridge].idle_keepalive` (#610):
+    /// `"off"` | `"silence"` | `"comfort_noise"`.
     /// `None` inherits the global. Unknown values fail at load
     /// (`UnknownRouteIdleKeepalive`).
     pub idle_keepalive: Option<String>,

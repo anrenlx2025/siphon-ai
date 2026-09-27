@@ -164,8 +164,8 @@ pub struct InboundCall<'a> {
     /// Resolved by the acceptor from `[bridge].rtp_stats_interval_ms`
     /// plus any per-route override.
     pub rtp_stats_interval: Option<std::time::Duration>,
-    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, upstream
-    /// issue #610) — what the tap emits toward the caller while the WS
+    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, #610) —
+    /// what the tap emits toward the caller while the WS
     /// server is silent and nothing else owns the caller's ear.
     /// Resolved by the acceptor from the global default plus any
     /// per-route override.

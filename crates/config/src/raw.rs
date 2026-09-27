@@ -1525,8 +1525,8 @@ pub struct RawBridge {
     #[serde(default)]
     pub ws_failure_prompt_file: Option<String>,
     /// What the tap emits toward the caller while the WS server is
-    /// silent and nothing else owns the caller's ear (upstream issue
-    /// #610): `"off"` (default — the v1 behaviour: an idle call emits
+    /// silent and nothing else owns the caller's ear (#610):
+    /// `"off"` (default — the v1 behaviour: an idle call emits
     /// no outbound RTP, which makes some media paths such as
     /// FreeSWITCH stop their own inbound RTP), `"silence"` (one zero
     /// frame per idle 20 ms tick), or `"comfort_noise"` (one

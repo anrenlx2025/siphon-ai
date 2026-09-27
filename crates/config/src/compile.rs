@@ -2999,7 +2999,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         .as_ref()
         .map(std::path::PathBuf::from);
 
-    // Idle keepalive (upstream #610). Off unless enabled; unknown
+    // Idle keepalive (#610). Off unless enabled; unknown
     // tokens fail loud here rather than silently inheriting on the
     // first call (CLAUDE.md §4.6).
     let idle_keepalive = match raw.idle_keepalive.as_deref() {
@@ -3265,7 +3265,7 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
             }
         }
         // Idle keepalive: same token set as the global key
-        // ([bridge].idle_keepalive, upstream #610). Without this a
+        // ([bridge].idle_keepalive, #610). Without this a
         // typo would load fine and silently inherit the global at
         // resolve time instead of failing loud (§4.6).
         if let Some(value) = route.bridge.idle_keepalive.as_deref() {

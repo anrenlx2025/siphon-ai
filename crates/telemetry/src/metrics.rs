@@ -570,7 +570,7 @@ pub const BARGE_IN_DECISIONS_TOTAL: &str = "siphon_ai_barge_in_decisions_total";
 
 /// Caller-leg 20 ms keepalive frames emitted by the tap while the WS
 /// server is silent and nothing else owns the caller's ear
-/// (`[bridge].idle_keepalive`, upstream issue #610). A sustained rate
+/// (`[bridge].idle_keepalive`, #610). A sustained rate
 /// means the feature is engaged and the RTP flow toward the caller's
 /// media path stays bidirectional; zero with the feature off is the
 /// v1 behaviour. No labels. Literal must match the call site in

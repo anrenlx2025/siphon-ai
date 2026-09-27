@@ -597,7 +597,7 @@ pub enum TimeoutVerdict {
 
 /// What the tap emits toward the caller while the WS server is silent
 /// and nothing else owns the caller's ear (`[bridge].idle_keepalive`,
-/// our answer to upstream issue #610).
+/// #610).
 ///
 /// #610: while the WS server streams nothing, the tap's pace tick is
 /// un-polled (its guard keeps an idle call from paying for it) and no
@@ -1435,10 +1435,8 @@ impl MediaTap {
         let mut keepalive_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
         keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         keepalive_tick.tick().await;
-        // Frame length: `sample_rate / 50` is the exact 20 ms sample
-        // count. The old `(sample_rate / 1000) * 20` form truncates at
-        // non-multiple-of-1000 rates (22050 Hz → 440 instead of 441),
-        // drifting the frame ~2.3 µs short every tick.
+        // Frame length: `sample_rate / 50` — the exact 20 ms sample
+        // count (bridge rates are 8/16 kHz; both divide evenly).
         let keepalive_frame_samples = self.sample_rate as usize / 50;
         // The comfort-noise generator is built only for the
         // `comfort_noise` mode; `silence` synthesizes zero frames
@@ -4065,8 +4063,8 @@ mod tests {
         }
     }
 
-    /// #610 regression guard (adversarial-review CRITICAL fix): idle
-    /// keepalive must never interleave with ACTIVE server streaming.
+    /// #610 regression guard: idle keepalive must never interleave
+    /// with ACTIVE server streaming.
     /// During a live 50 fps turn the outbound queue drains
     /// frame-by-frame (`drain_outbound` pops while unplayed < lead) and
     /// reads empty between server arrivals, so a bare

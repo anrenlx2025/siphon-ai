@@ -219,7 +219,7 @@ pub struct BridgeDefaults {
     /// checked at play time and fails open to a plain hangup.
     pub ws_failure_prompt_file: Option<std::path::PathBuf>,
     /// Caller-leg idle keepalive from `[bridge].idle_keepalive`
-    /// (upstream issue #610). Default `Off` — the v1 silence
+    /// (#610). Default `Off` — the v1 silence
     /// semantics, where an idle call emits no outbound RTP at all.
     /// Per-route override via `[route.bridge].idle_keepalive`
     /// (see [`resolve_idle_keepalive`]).
@@ -990,7 +990,7 @@ pub fn resolve_rtp_stats_interval(
 }
 
 /// Resolve the per-call idle-keepalive mode by merging the daemon
-/// default (`[bridge].idle_keepalive`, upstream issue #610) with the
+/// default (`[bridge].idle_keepalive`, #610) with the
 /// per-route override. Route values are validated at config load
 /// (`UnknownRouteIdleKeepalive`), so the unknown-token arm here is a
 /// belt-and-braces fallback for callers that assemble `CompiledRoute`s
